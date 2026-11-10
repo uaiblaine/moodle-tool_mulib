@@ -17,10 +17,13 @@ The format of this change log follows the advice given at [Keep a CHANGELOG](htt
 - mulib::json_encode() for consistent encoding of stored JSON data
 - course_trait with course search helpers for autocomplete sources
 - mulib::TRANSLATIONS list of languages shipped by all MuTMS plugins, with a test for missing strings and docs/translations.md
+- report_filter_bar, always visible filter bar of system reports with text, select, boolean and date filters
 
 ### Changed
 
 - remove mulib::clean_string(), standard clean_string() is used instead
+- remove duplicate mulib::upsert_record(), use mudb::upsert_record() instead
+- mudb::upsert_record_pgsql() is protected, use mudb::upsert_record()
 - new forms library
 - new integration of vendor/ plugin dependencies
 - cohort pickers offer advanced cohorts with any access record of the current user

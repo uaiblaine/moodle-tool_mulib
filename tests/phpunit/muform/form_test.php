@@ -29,17 +29,18 @@ use tool_mulib\muform\element\editor;
 use tool_mulib\muform\element\text;
 use tool_mulib\phpunit\muform\fixtures\dynamic_form;
 use tool_mulib\phpunit\muform\fixtures\simple_form;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Group;
 
 /**
  * Form lifecycle tests.
  *
- * @group       MuTMS
  * @package     tool_mulib
  * @copyright   2026 Petr Skoda
  * @license     https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
- *
- * @covers \tool_mulib\muform\form
  */
+#[CoversClass(\tool_mulib\muform\form::class)]
+#[Group('MuTMS')]
 final class form_test extends muform_testcase {
     public function test_new(): void {
         $form = new simple_form($this->get_url(), ['name' => 'Current', 'count' => 5, 'enabled' => 1, 'color' => 'green']);
@@ -309,6 +310,18 @@ final class form_test extends muform_testcase {
         $this->assertStringContainsString('data-muform-role="submit"', $html);
         $this->assertStringContainsString('data-muform-role="cancel"', $html);
         $this->assertStringContainsString('>' . get_string('required') . '<', $html);
+        $this->assertStringNotContainsString('data-muform-dirty', $html);
+    }
+
+    public function test_dirty(): void {
+        $form = new simple_form($this->get_url(), []);
+        $this->assertFalse($form->is_dirty());
+        $form->set_dirty(true);
+        $this->assertTrue($form->is_dirty());
+        $this->assertStringContainsString(' data-muform-dirty="1">', $this->render($form));
+        $form->set_dirty(false);
+        $this->assertFalse($form->is_dirty());
+        $this->assertStringNotContainsString('data-muform-dirty', $this->render($form));
     }
 
     public function test_render_variant(): void {

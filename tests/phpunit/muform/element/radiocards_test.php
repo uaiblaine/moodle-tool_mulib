@@ -28,6 +28,8 @@ use tool_mulib\muform\element\radiocards;
 use tool_mulib\muform\util\options;
 use tool_mulib\phpunit\muform\fixtures\simple_form;
 use tool_mulib\phpunit\muform\muform_testcase;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Group;
 
 /**
  * Radio cards element tests.
@@ -35,10 +37,10 @@ use tool_mulib\phpunit\muform\muform_testcase;
  * @package     tool_mulib
  * @copyright   2026 Petr Skoda
  * @license     https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
- *
- * @covers \tool_mulib\muform\element\radiocards
- * @covers \tool_mulib\muform\util\cards
  */
+#[CoversClass(\tool_mulib\muform\element\radiocards::class)]
+#[CoversClass(\tool_mulib\muform\util\cards_trait::class)]
+#[Group('MuTMS')]
 final class radiocards_test extends muform_testcase {
     /**
      * Add the tested element via hook.
@@ -152,5 +154,31 @@ final class radiocards_test extends muform_testcase {
         );
         $this->assertStringNotContainsString('id="id_type' . $s . '_0_description"', $html);
         $this->assertSame(3, substr_count($html, '<div class="form-check muform-card">'));
+    }
+
+    public function test_max_columns(): void {
+        $element = new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']);
+        $this->assertSame($element, $element->set_max_columns(2));
+        foreach ([0, 3] as $columns) {
+            try {
+                $element->set_max_columns($columns);
+                $this->fail('Exception expected');
+            } catch (coding_exception $ex) {
+                $this->assertStringContainsString('Card columns must be 1 or 2', $ex->getMessage());
+            }
+        }
+
+        $this->add_element();
+        $form = new simple_form($this->get_url(), []);
+        $html = $this->render($form);
+        $this->assertStringContainsString('<div class="muform-cards-container w-100">', $html);
+        $this->assertStringContainsString(' class="w-100 muform-cards">', $html);
+
+        $hook = function (muform_definition $hook): void {
+            $hook->form->add((new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']))->set_max_columns(1));
+        };
+        \core\di::get(\core\hook\manager::class)->phpunit_redirect_hook(muform_definition::class, $hook);
+        $html = $this->render(new simple_form($this->get_url(), []));
+        $this->assertStringContainsString(' class="w-100 muform-cards muform-cards-single">', $html);
     }
 }

@@ -20,6 +20,7 @@ namespace tool_mulib\reportbuilder\local\entities;
 
 use lang_string;
 use core_reportbuilder\local\entities\base;
+use core_reportbuilder\local\filters\select;
 use core_reportbuilder\local\filters\text;
 use core_reportbuilder\local\report\{column, filter};
 
@@ -130,10 +131,19 @@ final class query extends base {
         ))
             ->add_joins($this->get_joins())
             ->set_type(column::TYPE_TEXT)
-            ->add_fields("{$queryalias}.type")
+            ->add_fields("{$queryalias}.type, {$queryalias}.component")
             ->set_is_sortable(true)
             ->set_callback(static function (?string $value, \stdClass $row): string {
-                return s($row->type); // TODO: ask the query class for name of type.
+                if ($row->type === null) {
+                    return '';
+                }
+                $qman = \core\di::get(\tool_mulib\local\extdb\query_manager::class);
+                $classname = $qman->get_class((string)$row->component, $row->type);
+                if ($classname) {
+                    return $classname::get_name();
+                }
+                // Plugin providing this query type is not available.
+                return s($row->type);
             });
 
         $columns[] = (new column(
@@ -171,6 +181,8 @@ final class query extends base {
      * @return filter[]
      */
     protected function get_all_filters(): array {
+        global $DB;
+
         $queryalias = $this->get_table_alias('tool_mulib_extdb_query');
 
         $filters[] = (new filter(
@@ -190,6 +202,26 @@ final class query extends base {
             "{$queryalias}.component"
         ))
             ->add_joins($this->get_joins());
+
+        $filters[] = (new filter(
+            select::class,
+            'type',
+            new lang_string('extdb_query_type', 'tool_mulib'),
+            $this->get_entity_name(),
+            '(' . $DB->sql_concat("{$queryalias}.component", "'/'", "{$queryalias}.type") . ')'
+        ))
+            ->add_joins($this->get_joins())
+            ->set_options_callback(static function (): array {
+                $qman = \core\di::get(\tool_mulib\local\extdb\query_manager::class);
+                $options = [];
+                foreach ($qman->get_classes() as $component => $classes) {
+                    foreach ($classes as $type => $classname) {
+                        $options[$component . '/' . $type] = $classname::get_name();
+                    }
+                }
+                \core_collator::asort($options);
+                return $options;
+            });
 
         return $filters;
     }

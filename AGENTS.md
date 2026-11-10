@@ -39,7 +39,10 @@ $handler->render($form);
   control, `get_args()` returns them, `search()`, `label()`/`labels()` and `validate()` decide what may be
   selected. Reuse the traits in `classes/muform/util/autocomplete/`: `user_trait`, `cohort_trait`,
   `category_context_trait`, and `local\search_util` for search SQL and user labels. Tags use a `<component>\muform\tagarea\*` class the same way.
-- Multi-page forms: `tool_mulib\muform\wizard`; custom fields: the `customfields` element.
+- Multi-page forms: `tool_mulib\muform\wizard`, full page only (plain links, never dialogs). Submitted stages
+  are stored with `$wizard->complete_stage()`, valid data never skips a stage. Custom fields: the `customfields` element.
+- Sessions and events with start and end: one `datetimerange` element (text `2026-11-06 23:30 – 01:30 +1`,
+  value `['start' => int, 'end' => int]`, at most 24 hours, `set_default_duration()`), not two `datetime` elements.
 - Behat: `I set the following muform fields [in the "dialog[open]" "css_element"]:` and
   `the following muform fields [...] match:`, first column is the element name or its exact label.
 
@@ -103,6 +106,13 @@ if ($actions->has_items()) {
 ```
 
 - `output\entity_details`, `output\url_clipboard` - detail lists and copy-to-clipboard URLs.
+- `output\report_filter_bar` - always visible filter bar of system reports, every MuTMS report uses it.
+  Render it right before the report: `echo $OUTPUT->render(new report_filter_bar($report)); echo $report->output();`.
+  Text, select, boolean and date filters are edited in the bar, other types (course role, number, ...)
+  only in the core form, which moves into the bar as "Advanced filtering". New types: a branch in the PHP
+  constructor plus `isActive()`, `describe()`, `buildValues()` and the editor in `js/esm/src/reportbuilder/filterbar.ts`.
+  Core `set_filters` replaces all stored values, so every save sends all filters. Behat: `I press "+ Add filter"`,
+  click the filter name and value in `.tool_mulib-report-filter-bar-popover`, `Remove filter: <name>` button.
 
 ### Entity tabs (secondary navigation)
 
@@ -135,8 +145,11 @@ Capability: `tool/mulib:useextdb`.
 - Language packs of all MuTMS plugins follow `docs/translations.md`. `mulib::TRANSLATIONS` lists the
   languages every plugin must ship, `tests/phpunit/lang_test.php` fails on missing strings. In mpd,
   `mdl-lang-check <plugin dir>` also checks placeholders, HTML tags and order.
-- Behat: one run at a time (single test site); `php admin/cli/purge_caches.php` after adding classes,
-  `behat-init` after adding steps; fail dumps in the behat dataroot `behat_faildump`; summaries say
-  "1 scenario" in singular.
+- Behat: mpd has four independent sites (`behat`, `behat1` to `behat3`), one run per site, so a large
+  run such as `--tags=@MuTMS` can be split by component tags (`--tags="@MuTMS&&@tool_muprog,@tool_musudo"`)
+  across sites; failures under parallel load are often flaky, re-run them alone before debugging.
+  `php admin/cli/purge_caches.php` after adding classes, `behat-init` after adding steps, `behat-util --enable`
+  after adding a feature file (each site has its own `-init` and `-util`); fail dumps in the behat dataroot
+  `behat_faildump`; scenario line paths need absolute file paths; summaries say "1 scenario" in singular.
 - Never change license headers or `@copyright` tags of existing files. New files get
   `@copyright 2026 Petr Skoda`. Petr bumps versions and commits.

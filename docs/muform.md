@@ -157,7 +157,8 @@ download, also in a dialog.
 | `text`             | `(name, label, attributes)`                                                  | `string`, cleaned                                          | blank after trim |
 | `textarea`         | `(name, label, attributes)`                                                  | `string`, cleaned, `\n` line ends                          | blank after trim |
 | `number`           | `(name, label, attributes)`                                                  | `int`, `float` or `null`                                   | `null`           |
-| `datetime`         | `(name, label, attributes, displayformat = null)`                            | `int` timestamp or `null`                                  | `null`           |
+| `datetime`         | `(name, label, attributes)`                                                  | `int` timestamp or `null`                                  | `null`           |
+| `datetimerange`    | `(name, label, attributes)`                                                  | `['start' => int, 'end' => int]` or `null`                 | `null`           |
 | `duration`         | `(name, label, units = ['d', 'h', 'i'])`                                     | `int` seconds                                              | `0`              |
 | `dateinterval`     | `(name, label, units = ['y', 'm', 'w', 'd'])`                                | ISO 8601 duration `string` or `null`                       | `null`           |
 | `secret`           | `(name, label, attributes, allowclear = false)`                              | `null` keep, `''` cleared, `string` new                    | see below        |
@@ -213,9 +214,63 @@ need steps like 0.5 or units, use a `text` element with a validator.
 `datetime` is the only date element, because Moodle stores timestamps. It is a text input in the
 user's timezone with a date picker on top. There is no "enabled" checkbox, an empty value is simply
 `null`. With JavaScript the typed text is sent to a small server endpoint and the form submits the
-timestamp. Without JavaScript the server parses the text itself: a timestamp, the display format, or
-anything PHP understands, like `tomorrow 10:00`. The display format is the `muform_datetimeformat`
-lang string, `Y-m-d H:i` by default.
+timestamp. Without JavaScript the server parses the text itself. The display format is always the
+`muform_datetimeformat` lang string of the user's language: `Y-m-d H:i` in English, `n/j/Y g:i A`
+in US English (`lang/en_us` of tool_mulib overrides only this string) and `j. n. Y H:i` in Czech. Forms cannot change it, so users see and type dates the same way everywhere.
+
+Users may type:
+
+- numeric dates in the day and month order of the display format, with `.`, `/` or `-` and any
+  spaces: `4. 11. 2026 14:30` or `4.11.26 14.30` in Czech. ISO dates with the year first, like
+  `2026-11-04T14:30`, work in every language, and they are the only numeric dates the English ISO
+  format accepts;
+- a date without time, which gets the default time of the element. That is `00:00` unless the form sets
+  something else, for example `->set_default_time('23:59')` for end dates or `'15:00'` for events that
+  usually start in the afternoon. The picker opens empty fields on today at the same time;
+- a 2-digit year, which means 20yy, or a day and month with the closing dot, `4. 11.`, which means the
+  current year;
+- times with `AM`/`PM` in any case, with or without dots and space, `2:30pm` or `2 p.m.`, and 24 hour
+  times in every language. Formats with AM/PM also switch the picker hours to `12 AM … 11 PM`;
+- a time only, `14:30` or `2 pm`, which means today;
+- text matching the display format exactly, if a language uses one with month names.
+
+Anything else is invalid. Nothing is guessed: `4.11` might be a time, `tomorrow` works only in English,
+and PHP would read `4/11/2026` as April. In Behat use core timestamps such as `##tomorrow noon##`.
+
+The picker takes the first day of the week from Moodle (`calendar_startwday` and the user preference),
+and month and weekday names from the browser in the page language. "Today" is in the user's Moodle
+timezone. The timezone line under the input is only shown to users whose timezone differs from the
+site timezone.
+
+`datetimerange` is for sessions and events: one text input with start and end, such as
+`2026-11-06 11:30 – 12:30`, and the value `['start' => int, 'end' => int]` or `null`. Current data
+may be an array or object with `start` and `end` keys. A date and a start time with two end
+times is what people expect. It also avoids an end date that is wrong when the session crosses
+midnight in the user's timezone.
+
+- The start is anything `datetime` accepts. `set_default_time()` works the same way.
+- The separator is an en or em dash, with or without spaces, or a hyphen with spaces around it. Dates
+  contain hyphens too, so every possible split is tried and exactly one must give a valid range.
+- Ranges are at most 24 hours long, by design. Use two `datetime` elements for anything that may
+  last longer. The limit is the same wall clock time on the next day, so a range over a daylight
+  saving change may have 23 or 25 hours.
+- An end time without a date means the first such time after the start: `23:30 - 01:30` ends
+  the next day, `11:30 - 11:30` is a whole day. `01:30 +1` (also `01:30+1`) and a full end date
+  such as `2026-11-07 01:30` are accepted too, they must not go past the limit, so `11:30 - 12:30 +1`
+  is invalid. Dotted times like `13.30` are fine in the end.
+- Text with only a start gets `set_default_duration($seconds)`; without a default
+  duration the end is required. `set_max_duration($seconds)` sets a shorter limit and limits the
+  durations offered by the picker. Longer values from code, such as current data, a default or
+  submitted timestamps, are trimmed to 24 hours with a debugging message, longer default durations too.
+- The field always shows the start and the end time, with ` +1` when the end is on the next day in the
+  user's timezone. Users in other timezones may see the `+1` or not, the timestamps stay the same. A hint
+  under the input shows the duration, and the end date when it is on another day. Across a daylight
+  saving change the hint shows the real duration: `01:30 – 03:30` lasts one hour in spring.
+- The picker shows the calendar with start time, end time and a duration select. Changing the start
+  keeps the duration. Picking an end time sets the first such time after the start.
+- For reading, `calendar::format_range_html($range, $tz, $lang)` prints the airline style
+  `2026-11-06 23:30 – 01:30<sup>+1</sup>` with the full end date in the title. Frozen elements use it.
+  Copied text is `… 01:30+1`, which the element accepts again.
 
 `duration` is a number of seconds and never `null`. It shows one input per unit, days, hours and
 minutes by default, and adds them up on the server, so 90 minutes comes back as 1 hour 30 minutes.
@@ -356,10 +411,15 @@ option and returns `null`. For short lists like roles, `checkboxes` is nicer tha
 card with its title and an optional plain text description underneath, indexed by the same keys as
 the options. Descriptions are always visible and linked to the input with `aria-describedby`, the
 whole card is clickable. Use them instead of help buttons when users must understand what the
-options mean before choosing, for example cohort types or consequences of a conversion. Cards are
-always stacked, there is no inline variant. The look is inspired by Bootstrap 6 field group cards.
+options mean before choosing, for example cohort types or consequences of a conversion. There is
+no inline variant. The look is inspired by Bootstrap 6 field group cards.
 Descriptions are plain text on purpose: the clickable card cannot contain links or other interactive
 content, and screen readers read the description as text.
+
+Cards are shown in two columns when the element is at least 48rem wide, such as in full page forms
+and `xl` dialogs on large screens, `lg` and smaller dialogs keep one column. The layout follows the
+width of the element, not the screen (CSS container query). Use `->set_max_columns(1)` when long
+descriptions do not read well side by side.
 
 ### Yes or No
 
@@ -471,7 +531,7 @@ Then the following muform fields match:
 
 The first column is the element name, or its exact label when no element has that name. The second
 column is what a user would enter: option keys (or labels), comma separated for multiple values,
-`2026-09-26 10:00` for dates, seconds for durations, ISO strings for intervals, `[clear]` to clear a
+`2026-09-26 10:00` for dates, `2026-11-06 23:30 - 01:30` for date ranges, seconds for durations, ISO strings for intervals, `[clear]` to clear a
 secret. Checkboxes are checked by anything except empty or `0`. Files are uploaded with
 `I upload "lib/tests/fixtures/empty.txt" file to "attachments" muform filemanager`.
 
@@ -496,6 +556,11 @@ or `form.cancel()`.
 
 The browser validates on submit and when the user leaves a changed field, but the server always has
 the final word. A form is only submitted once, the buttons are disabled until a new form arrives.
+
+Forms are watched by the core change checker, so leaving a page with changed values asks for
+confirmation. `$form->set_dirty(true)` in the handler, or `form.markDirty()` in JavaScript, marks a form
+as having unsaved work even without changes, for example data prefilled from an import that is not
+saved yet. Submit, reload and cancel never ask.
 Jest tests are in `js/esm/tests/`.
 
 ## Dialogs
@@ -519,51 +584,57 @@ JavaScript they open the normal page. `create_report_action()` makes a report bu
 
 ## Wizards
 
-Use a wizard when creating something takes several steps. The state is stored in
-`tool_mulib_muform_wizard`, one row per running wizard, and the forms know nothing about it.
+Multi-step full page forms, open them with plain links, never in dialogs. State is one row in
+`tool_mulib_muform_wizard`, bound to the user, login session and wizard name; put the page parameters
+into the name. Rows older than a day are deleted.
 
-The row id travels in the URL, but the row can only be loaded by the same user in the same login
-session and by the same wizard, because it is protected by a hash of all of these. Include the page
-parameters in the wizard name, like `'auth_musaml_user_upload:' . $idp->id`, and the data cannot be
-replayed against another record either. Old rows are deleted after a day.
-
-The stored data is the only truth. On every request the script checks it stage by stage with
-`wizard::resolve_stages()`, and the first stage that is not valid yet is the current one. Users may
-go back to any finished stage, but never skip ahead. Each stage is its own form class and gets the
-stored data as current data, so uploaded files survive moving between stages.
+Stages never change, `start()` and `load()` get the same stage names with labels. Each stage is its
+own form class with the stored data as current data. A stage is completed only after
+`complete_stage()`, valid data never skips a stage. Completing a stage again resets the later ones.
+Stages that do not apply now are passed to `resolve_stages()` as skipped, the stepper shows them
+greyed out. Stage names are lowercase letters, `?stage=` requests a completed stage.
+`set_data()` stores defaults without completing anything.
 
 ```php
 $name = 'auth_musaml_user_upload:' . $idp->id;
-$wizard = wizard::load($name, optional_param(wizard::PARAM, 0, PARAM_INT));
+$stages = ['source' => 'Source', 'columns' => 'Columns', 'options' => 'Options'];
+$wizard = wizard::load($name, $stages);
 if (!$wizard) {
-    $wizard = wizard::start($name);
+    $wizard = wizard::start($name, $stages);
     redirect($wizard->get_url($pageurl));
 }
 $data = $wizard->get_data();
-$stages = wizard::resolve_stages(['source' => 'Source', 'columns' => 'Columns', 'options' => 'Options'],
-    fn(string $stage) => mapping_import::is_stage_valid($stage, $data), optional_param(wizard::STAGE_PARAM, null, PARAM_ALPHA));
-$stage = wizard::current_stage($stages);
+$isvalid = function (string $stage) use ($data): bool {
+    return match ($stage) {
+        'source' => mapping_import::is_source_valid($data),
+        'columns' => mapping_import::is_columns_valid($data),
+        'options' => mapping_import::is_options_valid($data),
+    };
+};
+$stage = $wizard->resolve_stages($isvalid);
+if ($wizard->is_finished()) {
+    // All stages completed, do the job, delete the wizard and redirect.
+}
 $form = new user_upload_source($wizard->get_url($pageurl, $stage), $data, ['idp' => $idp]);
 if ($form->is_cancelled()) {
     $wizard->delete();
     redirect($returnurl);
 }
-if ($form->is_reloaded() && $form->get_element('back')->get_value()) {
-    redirect($wizard->get_url($pageurl, 'source'));
+if ($form->is_reloaded() && $wizard->get_previous_stage() !== null && $form->get_element('back')->get_value()) {
+    redirect($wizard->get_url($pageurl, $wizard->get_previous_stage()));
 }
 if ($submitted = $form->get_data()) {
-    $wizard->set_data(mapping_import::save_source($data, $submitted, $form));
+    $wizard->complete_stage($stage, mapping_import::save_source($data, $submitted, $form));
     redirect($wizard->get_url($pageurl));
 }
 echo $OUTPUT->header();
-echo $wizard->render($OUTPUT, $stages, $pageurl, $form);
+echo $wizard->render($OUTPUT, $pageurl, $form);
 ```
 
-Wizards are full pages, so they use `redirect()` and `$OUTPUT` directly. The Back button is a
-`reload` element, not `cancel`, because dialogs close on cancel. Cancel and the final submit delete
-the row. `render()` shows a stepper above the form: numbered steps joined by a line, completed and
-current steps highlighted, reachable steps as links. It is vertical in narrow containers and horizontal
-from 30rem width (a CSS container query, so it also works in narrow page regions).
+The Back button is a `reload` element. Cancel and the final submit delete the row. The stepper is
+horizontal for up to 6 steps when there is room, and a sticky column left of the form in wide pages.
+With completed stages the form is marked dirty, so leaving the page asks for confirmation; stepper
+links do not ask unless the current stage was changed.
 
 ## Custom fields
 
