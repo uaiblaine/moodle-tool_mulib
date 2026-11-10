@@ -15,6 +15,22 @@
     flex-direction: column;
     gap: 0.5rem;
 }
+/* Two columns when the element is wide, such as in full page forms and xl dialogs, but not in lg dialogs. */
+.muform .muform-cards-container {
+    /* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator */
+    container-type: inline-size;
+}
+
+/* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator */
+@container (min-width: 48rem) {
+    .muform .muform-cards:not(.muform-cards-single) {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .muform .muform-cards:not(.muform-cards-single) > .muform-cards-group {
+        grid-column: 1 / -1;
+    }
+}
 .muform .muform-card {
     position: relative;
     margin: 0;
@@ -96,10 +112,12 @@
     opacity: 0.65;
 }
 
-/* muform: wizard stepper, vertical in narrow containers and horizontal when there is enough space.
+/* muform: wizard stepper, vertical in narrow containers and horizontal when there is enough space,
+   horizontal only up to 6 steps, in wide wizards such as full page forms a sticky column left of the form.
    Inspired by Bootstrap 6 stepper, own Bootstrap 5 compatible implementation,
    MuTMS cannot wait for the Bootstrap 6 migration of Moodle. */
 .muform-wizard-stages {
+    margin-bottom: 1.5rem;
     /* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator yet */
     container-type: inline-size;
 }
@@ -171,6 +189,14 @@
 .muform-stepper-item.disabled .muform-stepper-label {
     color: var(--bs-secondary-color);
 }
+/* Stages that do not apply now, the wizard moves past them. */
+.muform-stepper-item.skipped .muform-stepper-number,
+.muform-stepper-item.skipped .muform-stepper-label {
+    opacity: 0.5;
+}
+.muform-stepper-item.skipped .muform-stepper-label {
+    text-decoration: line-through;
+}
 .muform-stepper-item a.muform-stepper-label {
     text-decoration: none;
 }
@@ -180,22 +206,45 @@
 
 /* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator yet */
 @container (min-width: 30rem) {
-    .muform-stepper {
+    .muform-stepper:not(:has(> :nth-child(7))) {
         grid-auto-columns: 1fr;
         grid-auto-flow: column;
     }
-    .muform-stepper-item {
+    .muform-stepper:not(:has(> :nth-child(7))) .muform-stepper-item {
         grid-template-rows: var(--muform-stepper-size) auto;
         grid-template-columns: auto;
         align-items: start;
         justify-items: center;
         text-align: center;
     }
-    .muform-stepper-item::after {
+    .muform-stepper:not(:has(> :nth-child(7))) .muform-stepper-item::after {
         inset-block-start: calc((var(--muform-stepper-size) - var(--muform-stepper-track-size)) * 0.5);
         inset-inline-start: 50%;
         width: calc(100% + var(--muform-stepper-gap));
         height: var(--muform-stepper-track-size);
+    }
+}
+
+.muform-wizard-container {
+    /* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator yet */
+    container-type: inline-size;
+}
+
+/* stylelint-disable-next-line csstree/validator -- container queries are not known to the validator yet */
+@container (min-width: 64rem) {
+    .muform-wizard {
+        display: grid;
+        grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr);
+        gap: 2rem;
+        align-items: start;
+    }
+    /* The column is narrower than 30rem, so the stepper inside is vertical. */
+    .muform-wizard-stages {
+        position: sticky;
+        top: 5rem;
+        max-height: calc(100vh - 6rem);
+        margin-bottom: 0;
+        overflow-y: auto;
     }
 }
 
@@ -289,6 +338,9 @@ dialog.muform-dialog .modal-body {
     height: 2.2rem;
     padding: 0;
 }
+.muform-datetime-panel .muform-datetime-rangelabel {
+    min-width: 4.5rem;
+}
 
 /* muform: secrets and shared keys are masked text inputs, never password inputs. */
 .muform-secret-masked,
@@ -358,6 +410,12 @@ dialog.muform-dialog .modal-body {
     width: 100%;
 }
 
+/* muform: date and time ranges such as "11/6/2026 11:30 PM - 1:30 AM +1" do not fit the default input size. */
+.muform .felement .muform-datetimerange-input {
+    width: 20rem;
+    max-width: 100%;
+}
+
 /* muform: duration and date interval unit inputs, three digits. */
 .muform .felement .muform-duration-input,
 .muform .felement .muform-dateinterval-input {
@@ -368,4 +426,30 @@ dialog.muform-dialog .modal-body {
 .muform .muform-autocomplete-selected {
     cursor: text;
     min-height: calc(1.5em + 0.75rem + 2px);
+}
+
+/* Report filter bar: core filters button is moved into the bar by JavaScript, hide it until then. */
+.tool_mulib-report-filter-bar ~ .reportbuilder-report #dropdownFiltersButton {
+    visibility: hidden;
+}
+
+/* Report filter bar: core filters dropdown is outside of .reportbuilder-wrapper after moving into the bar. */
+.tool_mulib-report-filter-bar .filters-dropdown {
+    width: 32rem;
+    max-width: calc(100vw - 2rem);
+    padding: 0;
+}
+
+/* Form buttons stay visible at the bottom of the scrolled list without covering the last filter. */
+.tool_mulib-report-filter-bar .reportbuilder-filters-sidebar .fitem[data-groupname="buttonar"] {
+    position: sticky;
+    bottom: 0;
+    height: auto;
+    margin: 0;
+    padding: 0.75rem 0;
+    background-color: var(--bs-dropdown-bg, #fff);
+}
+
+.tool_mulib-report-filter-bar .reportbuilder-filters-sidebar {
+    max-height: 60vh;
 }

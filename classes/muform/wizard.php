@@ -23,35 +23,10 @@ use core\url;
 use stdClass;
 
 /**
- * Handler side helper for multi-page forms.
+ * Multi-page forms, see docs/muform.md.
  *
- * The state of a running wizard is one row in tool_mulib_muform_wizard, the row id
- * travels in the page URL and the row is bound to the wizard name, the owner and the
- * login session, so nobody else can load it, a re-login orphans it and the data of one
- * wizard can never be loaded by another one. Put the page parameters that the stored
- * data belongs to into the name (such as "auth_musaml_user_upload:" . $idpid), then a
- * row cannot be replayed against a different record. The stored data is the only
- * truth: the handler validates it stage by stage on every request and the first
- * invalid stage is the current one, a requested stage may only move back to a stage
- * that is already valid. Every stage is its own form class, it gets the stored data
- * as current data and the handler stores the validated result and redirects:
- *
- *   $name = 'auth_musaml_user_upload:' . $idp->id;
- *   $wizard = wizard::load($name, optional_param(wizard::PARAM, 0, PARAM_INT));
- *   if (!$wizard) {
- *       $wizard = wizard::start($name);
- *       redirect($wizard->get_url($pageurl));
- *   }
- *   $data = $wizard->get_data();
- *   $stages = wizard::resolve_stages($names, fn($stage) => my_import::is_stage_valid($stage, $data), $requested);
- *   $stage = wizard::current_stage($stages);
- *   ... build the stage form with $wizard->get_url($pageurl, $stage) and $data ...
- *   if ($form->is_cancelled()) { $wizard->delete(); redirect($returnurl); }
- *   if ($submitted = $form->get_data()) { $wizard->set_data(...); redirect($wizard->get_url($pageurl)); }
- *   echo $wizard->render($OUTPUT, $stages, $pageurl, $form);
- *
- * Rows older than TTL are deleted whenever a wizard starts, there is no cron.
- * A double click on the start link leaves one abandoned row behind, the purge takes care of it.
+ * State is one row per running wizard, bound to the user, login session, wizard name and stages.
+ * Stages never change, a stage is completed only after the user submitted it or when it is skipped.
  *
  * @package     tool_mulib
  * @copyright   2026 Petr Skoda
@@ -65,24 +40,33 @@ final class wizard {
     /** @var int rows older than this are purged when a wizard starts */
     public const int TTL = DAYSECS;
 
+    /** @var array<string,array{completed:bool,current:bool,skipped:bool}>|null state of stages from resolve_stages() */
+    private ?array $states = null;
+    /** @var string|null stage requested in the page URL */
+    private ?string $requested = null;
+
     /**
      * Constructor.
      *
      * @param stdClass $record row from tool_mulib_muform_wizard
+     * @param array $stages labels indexed by stage names
      */
     private function __construct(
         /** @var stdClass row from tool_mulib_muform_wizard */
         private stdClass $record,
+        /** @var array<string,string> labels indexed by stage names */
+        private array $stages,
     ) {
     }
 
     /**
-     * Start a new wizard for the current user, old rows of all users are purged first.
+     * Start a new wizard, old rows are deleted.
      *
-     * @param string $name wizard name, include the page parameters the data belongs to
+     * @param string $name wizard name including page parameters
+     * @param array $stages labels indexed by stage names, names are lowercase letters
      * @return self
      */
-    public static function start(string $name): self {
+    public static function start(string $name, array $stages): self {
         global $DB, $USER;
 
         if (!isloggedin() || isguestuser()) {
@@ -91,31 +75,33 @@ final class wizard {
         if (trim($name) === '') {
             throw new coding_exception('Wizard name is required');
         }
+        self::validate_stages($stages);
 
         $now = \core\di::get(\core\clock::class)->time();
         $DB->delete_records_select('tool_mulib_muform_wizard', 'timecreated < :cutoff', ['cutoff' => $now - self::TTL]);
 
         $record = new stdClass();
         $record->userid = (int)$USER->id;
-        $record->jsondata = '{}';
+        $record->jsondata = '{"data":{},"completed":[]}';
         $record->timecreated = $now;
-        $record->sessionhash = self::hash($name, $record->userid, $record->timecreated);
+        $record->sessionhash = self::hash($name, $stages, $record->userid, $record->timecreated);
         $record->id = $DB->insert_record('tool_mulib_muform_wizard', $record);
 
-        return new self($record);
+        return new self($record, $stages);
     }
 
     /**
-     * Load a running wizard of the current user, null when it does not exist, belongs
-     * to somebody else, was started by another wizard or in another login session.
+     * Load the running wizard from the page URL.
      *
-     * @param string $name the same name that started the wizard
-     * @param int $id row id, usually from the page parameter
-     * @return self|null
+     * @param string $name name used in start()
+     * @param array $stages the same stages as in start()
+     * @return self|null null when the wizard does not exist or belongs to another user, session, name or stages
      */
-    public static function load(string $name, int $id): ?self {
+    public static function load(string $name, array $stages): ?self {
         global $DB, $USER;
 
+        self::validate_stages($stages);
+        $id = optional_param(self::PARAM, 0, PARAM_INT);
         if ($id <= 0 || trim($name) === '' || !isloggedin() || isguestuser()) {
             return null;
         }
@@ -123,14 +109,15 @@ final class wizard {
         if (!$record) {
             return null;
         }
-        if (!hash_equals($record->sessionhash, self::hash($name, (int)$record->userid, (int)$record->timecreated))) {
+        $hash = self::hash($name, $stages, (int)$record->userid, (int)$record->timecreated);
+        if (!hash_equals($record->sessionhash, $hash)) {
             return null;
         }
-        return new self($record);
+        return new self($record, $stages);
     }
 
     /**
-     * Row id, the identifier used in URLs.
+     * Row id used in URLs.
      *
      * @return int
      */
@@ -139,29 +126,49 @@ final class wizard {
     }
 
     /**
-     * Stored state.
+     * Stored data.
      *
-     * @return array<string,mixed> decoded JSON object, empty when nothing was stored yet or the data is broken
+     * @return array<string,mixed>
      */
     public function get_data(): array {
-        $data = json_decode($this->record->jsondata, true);
-        return is_array($data) ? $data : [];
+        return $this->decode()['data'];
     }
 
     /**
-     * Replace the stored state, store only data that the handler has validated.
+     * Replace the stored data without completing a stage, for example defaults.
      *
-     * @param array $data string keys with JSON serialisable values, stored as a JSON object
+     * @param array $data
      */
     public function set_data(array $data): void {
-        global $DB;
-
-        $this->record->jsondata = \tool_mulib\local\mulib::json_encode($data);
-        $DB->set_field('tool_mulib_muform_wizard', 'jsondata', $this->record->jsondata, ['id' => $this->record->id]);
+        $this->store($data, $this->decode()['completed']);
     }
 
     /**
-     * Delete the state when the wizard finishes or is cancelled.
+     * Replace the stored data and complete the stage, later stages must be completed again.
+     *
+     * @param string $stage
+     * @param array $data
+     */
+    public function complete_stage(string $stage, array $data): void {
+        $states = $this->get_states();
+        if (!isset($states[$stage])) {
+            throw new coding_exception('Unknown wizard stage: ' . $stage);
+        }
+        $completed = [];
+        foreach ($states as $name => $state) {
+            // Skipped stages are not submitted, they must be completed if they apply later.
+            if (!$state['skipped']) {
+                $completed[] = $name;
+            }
+            if ($name === $stage) {
+                break;
+            }
+        }
+        $this->store($data, $completed);
+    }
+
+    /**
+     * Delete the row when the wizard finishes or is cancelled.
      */
     public function delete(): void {
         global $DB;
@@ -173,7 +180,7 @@ final class wizard {
      * Page URL with the wizard id and optionally a requested stage.
      *
      * @param url $pageurl
-     * @param string|null $stage stage name, null means the stage resolved from the stored data
+     * @param string|null $stage null means the current stage
      * @return url
      */
     public function get_url(url $pageurl, ?string $stage = null): url {
@@ -187,109 +194,208 @@ final class wizard {
     }
 
     /**
-     * Decide which stage is current from the stored data.
+     * Resolve stages, the current one is the first stage that is not completed
+     * or the stage requested in the page URL if it is not after it.
      *
-     * Stages are validated in order until the first invalid one, later stages are not
-     * validated at all. The first invalid stage is current, the last stage when all
-     * are valid; a requested stage wins only when it is valid or the first invalid one.
-     *
-     * @param array $names stage names in order as a list of strings, or labels indexed by stage names
-     * @param callable $isvalid callable(string $name): bool validating the stored data of the given stage
-     * @param string|null $requested requested stage name, usually from the page parameter
-     * @return array<int,array{name:string,label:string,valid:bool,current:bool}> stages in order
+     * @param callable $isvalid fn(string $name): bool
+     * @param string[] $skipped stages that do not apply now, they count as completed
+     * @return string the current stage
      */
-    public static function resolve_stages(array $names, callable $isvalid, ?string $requested): array {
-        if (!$names) {
-            throw new coding_exception('Wizard needs at least one stage');
-        }
-        $stages = [];
-        $current = null;
-        foreach ($names as $key => $value) {
-            $name = is_string($key) ? $key : (string)$value;
-            $label = is_string($key) ? (string)$value : $name;
-            $valid = ($current === null) && (bool)$isvalid($name);
-            if ($current === null && !$valid) {
-                $current = $name;
+    public function resolve_stages(callable $isvalid, array $skipped = []): string {
+        foreach ($skipped as $name) {
+            if (!is_string($name) || !isset($this->stages[$name])) {
+                throw new coding_exception('Unknown skipped wizard stage');
             }
-            $stages[] = ['name' => $name, 'label' => $label, 'valid' => $valid, 'current' => false];
+        }
+        $requested = optional_param(self::STAGE_PARAM, null, PARAM_ALPHA);
+        $completed = $this->decode()['completed'];
+
+        $states = [];
+        $current = null;
+        foreach ($this->stages as $name => $label) {
+            $isskipped = in_array($name, $skipped, true);
+            if ($current !== null) {
+                $done = false;
+            } else if ($isskipped) {
+                $done = true;
+            } else {
+                $done = in_array($name, $completed, true) && ($isvalid($name) === true);
+                if (!$done) {
+                    $current = $name;
+                }
+            }
+            $states[$name] = ['completed' => $done, 'current' => false, 'skipped' => $isskipped];
         }
         if ($current === null) {
-            $current = $stages[array_key_last($stages)]['name'];
-        }
-        foreach ($stages as $stage) {
-            if ($stage['name'] === $requested) {
-                if ($stage['valid'] || $stage['name'] === $current) {
-                    $current = $stage['name'];
+            // All stages completed, the last stage that is not skipped is current.
+            foreach ($states as $name => $state) {
+                if (!$state['skipped']) {
+                    $current = $name;
                 }
-                break;
+            }
+            if ($current === null) {
+                throw new coding_exception('All wizard stages are skipped');
             }
         }
-        foreach ($stages as $i => $stage) {
-            $stages[$i]['current'] = ($stage['name'] === $current);
+        if ($requested !== null && isset($states[$requested]) && !$states[$requested]['skipped']) {
+            if ($states[$requested]['completed'] || $requested === $current) {
+                $current = $requested;
+            }
         }
-        return $stages;
+        $states[$current]['current'] = true;
+
+        $this->states = $states;
+        $this->requested = $requested;
+        return $current;
     }
 
     /**
-     * Name of the current stage.
+     * The last stage before the current one that is not skipped, for Back buttons.
      *
-     * @param array $stages result of resolve_stages(), a list of array{name:string,label:string,valid:bool,current:bool}
-     * @return string
+     * @return string|null null on the first stage
      */
-    public static function current_stage(array $stages): string {
-        foreach ($stages as $stage) {
-            if ($stage['current']) {
-                return $stage['name'];
+    public function get_previous_stage(): ?string {
+        $previous = null;
+        foreach ($this->get_states() as $name => $state) {
+            if ($state['current']) {
+                return $previous;
+            }
+            if (!$state['skipped']) {
+                $previous = $name;
             }
         }
-        throw new coding_exception('No current wizard stage');
+        return null;
     }
 
     /**
-     * Render the stage form inside the wizard layout: the step list on the left, the form on the right.
+     * Are all stages completed and no stage was requested?
      *
-     * Every stage the user may go to is a link, those are the valid stages and the first
-     * invalid one, which is exactly what resolve_stages() accepts as a requested stage;
-     * completed and current stages are active, the current stage is highlighted, later stages are disabled.
+     * @return bool
+     */
+    public function is_finished(): bool {
+        if ($this->requested !== null) {
+            return false;
+        }
+        foreach ($this->get_states() as $state) {
+            if (!$state['completed']) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Render the stepper and the form, with completed stages the form is marked dirty.
      *
      * @param core_renderer $output
-     * @param array $stages result of resolve_stages(), a list of array{name:string,label:string,valid:bool,current:bool}
      * @param url $pageurl
      * @param form $form the form of the current stage
      * @return string
      */
-    public function render(core_renderer $output, array $stages, url $pageurl, form $form): string {
+    public function render(core_renderer $output, url $pageurl, form $form): string {
         $items = [];
-        $invalidseen = false;
-        foreach ($stages as $i => $stage) {
-            $reachable = $stage['valid'] || !$invalidseen;
-            $invalidseen = $invalidseen || !$stage['valid'];
+        $pendingseen = false;
+        $number = 0;
+        $anycompleted = false;
+        foreach ($this->get_states() as $name => $state) {
+            $number++;
+            $reachable = !$state['skipped'] && ($state['completed'] || !$pendingseen);
+            $pendingseen = $pendingseen || !$state['completed'];
+            $anycompleted = $anycompleted || ($state['completed'] && !$state['skipped']);
             $items[] = [
-                'number' => $i + 1,
-                'label' => clean_string($stage['label']),
-                'is_active' => $stage['valid'] || $stage['current'],
-                'is_current' => $stage['current'],
-                'is_link' => $reachable && !$stage['current'],
-                'url' => $this->get_url($pageurl, $stage['name'])->out(false),
+                'number' => $number,
+                'label' => clean_string($this->stages[$name]),
+                'is_active' => ($state['completed'] && !$state['skipped']) || $state['current'],
+                'is_current' => $state['current'],
+                'is_skipped' => $state['skipped'],
+                'is_link' => $reachable && !$state['current'],
+                'url' => $this->get_url($pageurl, $name)->out(false),
             ];
+        }
+        // Leaving the page loses completed stages, nothing links back to a running wizard.
+        if ($anycompleted) {
+            $form->set_dirty(true);
         }
         return $output->render_from_template('tool_mulib/muform/wizard', [
             'title' => clean_string(get_string('muform_steps', 'tool_mulib')),
+            'skippedhint' => clean_string(get_string('muform_stepskipped', 'tool_mulib')),
             'stages' => $items,
             'formhtml' => $form->render($output),
         ]);
     }
 
     /**
-     * Hash binding a row to the wizard name, the owner and the login session; the name
-     * and the sesskey are never stored.
+     * State of stages from resolve_stages().
+     *
+     * @return array<string,array{completed:bool,current:bool,skipped:bool}>
+     */
+    private function get_states(): array {
+        if ($this->states === null) {
+            throw new coding_exception('Wizard stages are not resolved yet');
+        }
+        return $this->states;
+    }
+
+    /**
+     * Data and completed stages from the row.
+     *
+     * @return array{data:array,completed:string[]}
+     */
+    private function decode(): array {
+        $decoded = json_decode($this->record->jsondata, true);
+        $data = (is_array($decoded) && is_array($decoded['data'] ?? null)) ? $decoded['data'] : [];
+        $completed = [];
+        if (is_array($decoded) && is_array($decoded['completed'] ?? null)) {
+            foreach ($decoded['completed'] as $name) {
+                if (is_string($name)) {
+                    $completed[] = $name;
+                }
+            }
+        }
+        return ['data' => $data, 'completed' => $completed];
+    }
+
+    /**
+     * Save data and completed stages to the row.
+     *
+     * @param array $data
+     * @param string[] $completed names of completed stages
+     */
+    private function store(array $data, array $completed): void {
+        global $DB;
+
+        // An empty array must stay a JSON object.
+        $json = ['data' => (object)$data, 'completed' => array_values($completed)];
+        $this->record->jsondata = \tool_mulib\local\mulib::json_encode($json);
+        $DB->set_field('tool_mulib_muform_wizard', 'jsondata', $this->record->jsondata, ['id' => $this->record->id]);
+    }
+
+    /**
+     * Stages must be labels indexed by lowercase stage names.
+     *
+     * @param array $stages
+     */
+    private static function validate_stages(array $stages): void {
+        if (!$stages) {
+            throw new coding_exception('Wizard needs at least one stage');
+        }
+        foreach ($stages as $name => $label) {
+            if (!is_string($name) || !is_string($label) || !preg_match('/^[a-z]+$/D', $name)) {
+                throw new coding_exception('Wizard stages must be labels indexed by lowercase stage names');
+            }
+        }
+    }
+
+    /**
+     * Hash binding the row to the wizard name, stages, user and login session.
      *
      * @param string $name
+     * @param array $stages
      * @param int $userid
      * @param int $timecreated
      * @return string
      */
-    private static function hash(string $name, int $userid, int $timecreated): string {
-        return sha1($name . '/' . $userid . '/' . sesskey() . '/' . $timecreated);
+    private static function hash(string $name, array $stages, int $userid, int $timecreated): string {
+        return sha1($name . '/' . implode(',', array_keys($stages)) . '/' . $userid . '/' . sesskey() . '/' . $timecreated);
     }
 }
