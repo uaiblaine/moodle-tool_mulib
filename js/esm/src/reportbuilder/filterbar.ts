@@ -16,8 +16,8 @@
 /**
  * Always visible filter bar of a system report.
  *
- * Active filters are shown as buttons with their values, inactive filters are collapsed
- * in an "add filter" menu, the core filters form is available as "Advanced filters" button.
+ * Active filters are shown as buttons with their values, pinned filters are shown always,
+ * other inactive filters are collapsed in an "add filter" menu, the core filters form is available as "Advanced filters" button.
  * Values are stored through the standard report builder web services
  * and the report table is reloaded without page reload.
  *
@@ -54,6 +54,9 @@ export const BOOLEAN_NO = 2;
 
 /** Report table reload event, see core_reportbuilder/local/events. */
 const TABLE_RELOAD = 'core_reportbuilder_table_reload';
+
+/** Dispatched on the report element after filters are stored, the detail has the count of active filters. */
+export const FILTERS_CHANGED = 'tool_mulib/reportbuilder:filterschanged';
 
 /** Text filter operator "is empty". */
 export const TEXT_IS_EMPTY = 7;
@@ -113,13 +116,15 @@ export interface FilterOption {
 export interface Filter {
     key: string;
     /** Filters of type "other" can be changed in the core form only. */
-    type: 'text' | 'select' | 'boolean' | 'date' | 'other';
+    type: 'text' | 'select' | 'boolean' | 'date' | 'checkboxes' | 'other';
     label: string;
     operator: number;
     /** Text, selected option or number of units of relative date operators. */
     value: string;
-    /** Select options or operators offered in date filters. */
+    /** Select and checkboxes options, operators offered in date filters, or values of boolean filters that do not offer both. */
     options: FilterOption[];
+    /** Checked options of checkboxes filters, records matching any of them are shown. */
+    checked?: string[];
     /** Unit of relative date operators. */
     unit?: number;
     /** Start of date range, 0 means none. */
@@ -136,6 +141,12 @@ export interface Filter {
     values?: Record<string, unknown>;
     /** Is "other" filter restricting the report? */
     active?: boolean;
+    /** Pinned filters are always shown in the bar. */
+    pinned?: boolean;
+    /** Text of a pinned filter that is not restricting the report, such as "Any". */
+    anylabel?: string;
+    /** Default value defined by the page, stored for users without stored filters. */
+    default?: Pick<Filter, 'operator' | 'value' | 'checked' | 'unit' | 'from' | 'to' | 'fromtext' | 'totext' | 'operatorlabel'>;
 }
 
 /** Date and time settings of the user, exported when the report has date filters. */
@@ -157,6 +168,8 @@ export interface Strings {
     remove: string;
     apply: string;
     useadvanced: string;
+    resetdefault: string;
+    resetall: string;
     search: string;
     yes: string;
     no: string;
@@ -182,6 +195,22 @@ export interface Strings {
  * @returns text
  */
 const fill = (template: string, value: string): string => template.replace('{$a}', () => value);
+
+/**
+ * Plain text of a string exported with clean_string(), which has HTML entities and no tags.
+ *
+ * All texts are added to the page as text nodes, entities would be shown as they are.
+ *
+ * @param html
+ * @returns text
+ */
+export const decodeEntities = (html: string): string => {
+    if (!html.includes('&')) {
+        return html;
+    }
+    // Parsed documents are inert, nothing is loaded or executed.
+    return new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '';
+};
 
 /**
  * Number of date units in words, such as "2 weeks".
@@ -233,6 +262,9 @@ export const isActive = (filter: Filter): boolean => {
     if (filter.type === 'other') {
         return filter.active === true;
     }
+    if (filter.type === 'checkboxes') {
+        return (filter.checked ?? []).length > 0;
+    }
     if (filter.operator === ANY_VALUE) {
         return false;
     }
@@ -269,6 +301,10 @@ export const describe = (filter: Filter, strings: Strings, settings: DateTimeSet
     }
     if (filter.type === 'date') {
         return describeDate(filter, strings, settings);
+    }
+    if (filter.type === 'checkboxes') {
+        const checked = filter.checked ?? [];
+        return filter.options.filter((option) => checked.includes(option.value)).map((option) => option.label).join(', ');
     }
     let value = filter.value;
     if (filter.type === 'select') {
@@ -309,6 +345,22 @@ const describeDate = (filter: Filter, strings: Strings, settings: DateTimeSettin
 };
 
 /**
+ * Text of the filter button in the bar.
+ *
+ * @param filter active or pinned filter
+ * @param strings
+ * @param settings date and time settings, null if there are no date filters
+ * @returns button text
+ */
+export const buttonLabel = (filter: Filter, strings: Strings, settings: DateTimeSettings | null = null): string => {
+    if (!isActive(filter)) {
+        return filter.label + ': ' + (filter.anylabel ?? '');
+    }
+    const description = describe(filter, strings, settings);
+    return description === '' ? filter.label : filter.label + ': ' + description;
+};
+
+/**
  * Filter values in the format of report builder filter forms.
  *
  * @param filters
@@ -325,15 +377,14 @@ export const buildValues = (filters: Filter[]): Record<string, unknown> => {
             }
             continue;
         }
+        if (filter.type === 'checkboxes') {
+            // Core replaces all stored values, values of a former select filter are dropped here.
+            values[filter.key + '_values'] = active ? [...(filter.checked ?? [])] : [];
+            continue;
+        }
         values[filter.key + '_operator'] = active ? filter.operator : ANY_VALUE;
         if (filter.type === 'date') {
-            // Defaults of the core form for unused parts.
-            const relative = active && (DATE_RELATIVE.includes(filter.operator) || filter.operator === DATE_CURRENT);
-            const range = active && filter.operator === DATE_RANGE;
-            values[filter.key + '_value'] = relative && DATE_RELATIVE.includes(filter.operator) ? Number(filter.value) : 1;
-            values[filter.key + '_unit'] = relative ? (filter.unit ?? DATE_UNIT_DAY) : DATE_UNIT_DAY;
-            values[filter.key + '_from'] = range ? (filter.from ?? 0) : 0;
-            values[filter.key + '_to'] = range ? (filter.to ?? 0) : 0;
+            Object.assign(values, buildDateValues(filter, active));
             continue;
         }
         if (filter.type !== 'boolean') {
@@ -342,6 +393,45 @@ export const buildValues = (filters: Filter[]): Record<string, unknown> => {
     }
     return values;
 };
+
+/**
+ * Values of date filter except the operator, defaults of the core form for unused parts.
+ *
+ * @param filter
+ * @param active
+ * @returns values keyed by form element names
+ */
+const buildDateValues = (filter: Filter, active: boolean): Record<string, unknown> => {
+    const relative = active && (DATE_RELATIVE.includes(filter.operator) || filter.operator === DATE_CURRENT);
+    const range = active && filter.operator === DATE_RANGE;
+    return {
+        [filter.key + '_value']: relative && DATE_RELATIVE.includes(filter.operator) ? Number(filter.value) : 1,
+        [filter.key + '_unit']: relative ? (filter.unit ?? DATE_UNIT_DAY) : DATE_UNIT_DAY,
+        [filter.key + '_from']: range ? (filter.from ?? 0) : 0,
+        [filter.key + '_to']: range ? (filter.to ?? 0) : 0,
+    };
+};
+
+/**
+ * Has the filter its default value?
+ *
+ * @param filter
+ * @returns true if the stored values would be the same as the default, false for filters without default
+ */
+export const isDefault = (filter: Filter): boolean => {
+    if (!filter.default) {
+        return false;
+    }
+    return JSON.stringify(buildValues([filter])) === JSON.stringify(buildValues([{...filter, ...filter.default}]));
+};
+
+/**
+ * Is the filter in the state of a report that was never filtered?
+ *
+ * @param filter
+ * @returns true if the filter has its default value, or does not filter when it has no default
+ */
+export const isInitial = (filter: Filter): boolean => (filter.default ? isDefault(filter) : !isActive(filter));
 
 /** Subset of core/fragment. */
 interface FragmentApi {
@@ -376,6 +466,15 @@ class FilterBar {
         this.reportId = Number(root.dataset.reportId);
         this.parameters = root.dataset.reportParameters ?? '[]';
         this.filters = JSON.parse(root.dataset.filters ?? '[]') as Filter[];
+        for (const filter of this.filters) {
+            filter.label = decodeEntities(filter.label);
+            if (filter.anylabel !== undefined) {
+                filter.anylabel = decodeEntities(filter.anylabel);
+            }
+            for (const option of filter.options) {
+                option.label = decodeEntities(option.label);
+            }
+        }
         this.datetime = JSON.parse(root.dataset.datetime || 'null') as DateTimeSettings | null;
         this.strings = strings;
         this.root.style.position = 'relative';
@@ -465,6 +564,9 @@ class FilterBar {
             filter.active = false;
             filter.values = {};
         }
+        if (filter.type === 'checkboxes') {
+            filter.checked = [];
+        }
     }
 
     /** Render buttons of the bar. */
@@ -474,7 +576,8 @@ class FilterBar {
 
         const inactive: Filter[] = [];
         for (const filter of this.filters) {
-            if (!isActive(filter)) {
+            const active = isActive(filter);
+            if (!active && !filter.pinned) {
                 if (filter.type !== 'other') {
                     inactive.push(filter);
                 }
@@ -484,19 +587,24 @@ class FilterBar {
             group.className = 'btn-group btn-group-sm';
             group.dataset.filterKey = filter.key;
 
-            const description = describe(filter, this.strings, this.datetime);
-            const edit = this.button(description === '' ? filter.label : filter.label + ': ' + description, 'btn btn-primary');
+            // Pinned filters stay in the bar with the "any" text when they do not filter.
+            const edit = this.button(
+                buttonLabel(filter, this.strings, this.datetime),
+                active ? 'btn btn-primary' : 'btn btn-outline-secondary',
+            );
             edit.addEventListener('click', () => this.openEditor(filter, group));
             group.append(edit);
 
-            const remove = this.button('×', 'btn btn-primary');
-            remove.setAttribute('aria-label', this.strings.remove + ': ' + filter.label);
-            remove.title = this.strings.remove;
-            remove.addEventListener('click', () => {
-                this.clear(filter);
-                void this.save();
-            });
-            group.append(remove);
+            if (active) {
+                const remove = this.button('×', 'btn btn-primary');
+                remove.setAttribute('aria-label', this.strings.remove + ': ' + filter.label);
+                remove.title = this.strings.remove;
+                remove.addEventListener('click', () => {
+                    this.clear(filter);
+                    void this.save();
+                });
+                group.append(remove);
+            }
 
             this.root.append(group);
         }
@@ -507,7 +615,20 @@ class FilterBar {
             this.root.append(more);
         }
 
-        // Core filters form for anything the bar cannot do, including reset of all filters.
+        // One click back to the initial state: default values, nothing else.
+        if (!this.filters.every(isInitial)) {
+            const reset = this.button('↺ ' + this.strings.resetall, 'btn btn-sm btn-link');
+            reset.addEventListener('click', () => {
+                for (const filter of this.filters) {
+                    this.clear(filter);
+                    Object.assign(filter, filter.default);
+                }
+                void this.save();
+            });
+            this.root.append(reset);
+        }
+
+        // Core filters form for anything the bar cannot do.
         if (this.coreFilters) {
             this.root.append(this.coreFilters);
         }
@@ -595,6 +716,13 @@ class FilterBar {
      * @param anchor
      */
     private openEditor(filter: Filter, anchor: HTMLElement): void {
+        const advanced = this.coreFilters?.querySelector<HTMLElement>('#dropdownFiltersButton');
+        if (filter.type === 'other' && filter.pinned && advanced) {
+            // Only the core form can edit the filter, wait until this click is over so that it does not close the dropdown.
+            this.closePopover();
+            setTimeout(() => advanced.click(), 0);
+            return;
+        }
         const content = document.createElement('div');
         const title = document.createElement(filter.type === 'text' ? 'label' : 'div');
         title.className = 'fw-bold mb-2';
@@ -630,10 +758,16 @@ class FilterBar {
             content.append(form);
         } else if (filter.type === 'date') {
             content.append(this.dateEditor(filter));
+        } else if (filter.type === 'checkboxes') {
+            content.append(this.checkboxesEditor(filter));
         } else if (filter.type === 'boolean') {
             const group = document.createElement('div');
             group.className = 'd-flex gap-2';
-            for (const [operator, text] of [[BOOLEAN_YES, this.strings.yes], [BOOLEAN_NO, this.strings.no]] as const) {
+            // Filters limited to some of the values export them as options.
+            const choices: [number, string][] = filter.options.length
+                ? filter.options.map((option) => [Number(option.value), option.label])
+                : [[BOOLEAN_YES, this.strings.yes], [BOOLEAN_NO, this.strings.no]];
+            for (const [operator, text] of choices) {
                 const selected = filter.operator === operator;
                 const button = this.button(text, selected ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-outline-primary');
                 button.addEventListener('click', () => {
@@ -679,6 +813,16 @@ class FilterBar {
             content.append(list);
         }
 
+        if (filter.default && !isDefault(filter)) {
+            const reset = this.button(this.strings.resetdefault, 'btn btn-sm btn-link px-0 mt-2');
+            reset.addEventListener('click', () => {
+                delete filter.operatorlabel;
+                Object.assign(filter, filter.default);
+                void this.save();
+            });
+            content.append(reset);
+        }
+
         this.openPopover(anchor, content);
     }
 
@@ -714,6 +858,44 @@ class FilterBar {
             select.append(new Option(option.label, option.value, false, option.value === value));
         }
         return select;
+    }
+
+    /**
+     * Editor of checkboxes filter, applied together so that the report is reloaded once.
+     *
+     * @param filter
+     * @returns form
+     */
+    private checkboxesEditor(filter: Filter): HTMLFormElement {
+        const form = document.createElement('form');
+        const checked = filter.checked ?? [];
+        const inputs: HTMLInputElement[] = [];
+        filter.options.forEach((option, index) => {
+            const item = document.createElement('div');
+            item.className = 'form-check';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.className = 'form-check-input';
+            input.id = this.root.id + '-option-' + index;
+            input.value = option.value;
+            input.checked = checked.includes(option.value);
+            const label = document.createElement('label');
+            label.className = 'form-check-label';
+            label.htmlFor = input.id;
+            label.textContent = option.label;
+            item.append(input, label);
+            form.append(item);
+            inputs.push(input);
+        });
+        const apply = this.button(this.strings.apply, 'btn btn-sm btn-primary mt-2');
+        apply.type = 'submit';
+        form.append(apply);
+        form.addEventListener('submit', (event) => {
+            event.preventDefault();
+            filter.checked = inputs.filter((input) => input.checked).map((input) => input.value);
+            void this.save();
+        });
+        return form;
     }
 
     /**
@@ -967,6 +1149,10 @@ class FilterBar {
                 },
             });
             this.reload();
+            this.getReport()?.dispatchEvent(new CustomEvent(FILTERS_CHANGED, {
+                bubbles: true,
+                detail: {count: this.filters.filter(isActive).length},
+            }));
             await this.refreshCoreFilters();
         } finally {
             pending.resolve();
@@ -987,14 +1173,16 @@ export const initFilterBar = async(root: HTMLElement | null): Promise<void> => {
     const pending = new Pending('tool_mulib/reportbuilder:filterbar-init');
     try {
         const [
-            add, advanced, remove, apply, useadvanced, rangefrom, rangeto, search, yes, no, datefrom, dateto,
-            fieldoperator, fieldvalue, fieldunit, invalid, invalidrange,
+            add, advanced, remove, apply, useadvanced, resetdefault, resetall, rangefrom, rangeto, search, yes, no,
+            datefrom, dateto, fieldoperator, fieldvalue, fieldunit, invalid, invalidrange,
         ] = await getStrings([
             {key: 'filterbar_add', component: 'tool_mulib'},
             {key: 'filterbar_advanced', component: 'tool_mulib'},
             {key: 'filterbar_remove', component: 'tool_mulib'},
             {key: 'filterbar_apply', component: 'tool_mulib'},
             {key: 'filterbar_useadvanced', component: 'tool_mulib'},
+            {key: 'filterbar_resetdefault', component: 'tool_mulib'},
+            {key: 'filterbar_resetall', component: 'tool_mulib'},
             {key: 'filterbar_rangefrom', component: 'tool_mulib'},
             {key: 'filterbar_rangeto', component: 'tool_mulib'},
             {key: 'search', component: 'core'},
@@ -1009,8 +1197,8 @@ export const initFilterBar = async(root: HTMLElement | null): Promise<void> => {
             {key: 'muform_datetimerangeinvalid', component: 'tool_mulib'},
         ]);
         new FilterBar(root, {
-            add, advanced, remove, apply, useadvanced, search, yes, no, rangefrom, rangeto, datefrom, dateto,
-            fieldoperator, fieldvalue, fieldunit, invalid, invalidrange,
+            add, advanced, remove, apply, useadvanced, resetdefault, resetall, search, yes, no, rangefrom, rangeto,
+            datefrom, dateto, fieldoperator, fieldvalue, fieldunit, invalid, invalidrange,
         });
     } finally {
         pending.resolve();

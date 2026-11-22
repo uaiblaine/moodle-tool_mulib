@@ -34,13 +34,34 @@ $handler->render($form);
 - Dialog triggers: `tool_mulib\output\muform\dialog\{button,link,icon}`, `create_report_action()` for
   report builder, `dropdown::add_dialog()` for header menus, `set_submitted_action()` with
   `tool_mulib\muform\handler\dialog::ACTION_RELOAD|ACTION_REDIRECT|ACTION_NOTHING`. Default size is `lg`.
-- Autocomplete: sources in `<component>\muform\autocomplete\*` and `<component>\muform\autocompletemany\*`
-  extend `tool_mulib\muform\autocomplete(many)\base`. The constructor takes scalar ids and does the access
-  control, `get_args()` returns them, `search()`, `label()`/`labels()` and `validate()` decide what may be
-  selected. Reuse the traits in `classes/muform/util/autocomplete/`: `user_trait`, `cohort_trait`,
-  `category_context_trait`, and `local\search_util` for search SQL and user labels. Tags use a `<component>\muform\tagarea\*` class the same way.
-- Multi-page forms: `tool_mulib\muform\wizard`, full page only (plain links, never dialogs). Submitted stages
-  are stored with `$wizard->complete_stage()`, valid data never skips a stage. Custom fields: the `customfields` element.
+- Autocomplete: one source class serves both `autocomplete` and `autocompletemany`; sources live in
+  `<component>\muform\autocomplete\*` and extend `tool_mulib\muform\autocomplete\base`. The constructor takes scalar
+  ids and does the access control, `get_args()` returns them, `search($query, $maxitems, $exclude)`, `labels()` or
+  `label_value()` and `validate()` or `validate_value()` decide what may be selected. Reuse the traits in
+  `classes/muform/util/autocomplete/`: `user_trait`, `course_trait`, `category_context_trait`, and
+  `local\search_util` for search SQL and user labels. Tags use a `<component>\muform\tagarea\*` class the same way.
+- Pickers (`picker`, `pickermany`): selected values are pills, a button opens a family panel (React) over the
+  right half of the screen. A family is an abstract `tool_mulib\muform\picker\base` subclass, a panel module
+  and the family's own endpoints (`base::require_browser_session()`, `<family base>::instantiate()`); values
+  are opaque strings like autocomplete values; `are_allowed($values)` of a source re-checks values in form
+  `validation()`. See "Picker" in `docs/muform.md`.
+- User pickers: `userpicker`/`userpickermany` elements with a source in `<component>\muform\userpicker\*` extending
+  `tool_mulib\muform\userpicker\base` (`get_context()`, optional `get_candidates_sql()`/`get_selected_sql()` on alias `u`,
+  `allow_suspended_users()`); a panel with identity columns (`showuseridentity`) and paging, tenant rules apply.
+  Filter pills above the list: pinned "Active: Yes" hides suspended users by default, "Cohort" filters by membership
+  of cohorts whose members the user may list; sources add `picker\filter::boolean()`, `filter::select()` and
+  `filter::autocomplete()` (values searched in an autocomplete source) with optional default values and `set_pinned()` in `get_filters()`;
+  other picker families reuse them with `picker\filter_set` and the `tool_mulib/muform/pickerfilters` component.
+- Cohort pickers: `cohortpicker`/`cohortpickermany` elements with a source in `<component>\muform\cohortpicker\*` extending
+  `tool_mulib\muform\cohortpicker\base` (`get_context()`, optional `get_current_cohortids()`, `get_excluded_cohortids()`,
+  `get_restriction_sql()`); the panel shows cohorts in the tree of course categories, a search keeps found cohorts
+  in their branch. The base offers cohorts the user may use (`cohort_util::get_use_sql()`), tenant rules apply; forms
+  that reveal members of picked cohorts add `cohort_util::get_view_members_sql()` in `get_restriction_sql()`.
+  Never select cohorts with autocompletes, the only exception is the "Cohort" filter of user pickers.
+- Multi-page forms: a `tool_mulib\muform\wizard_page` subclass `<component>\local\wizard\<name>\wizard` with one
+  form class per stage in the same namespace and a thin entry script calling `execute()`; full page only (plain
+  links, never dialogs). Stage forms use the `wizardcontinue` and `wizardback` buttons, wizard state never holds
+  values that were not validated, valid data never skips a stage. Custom fields: the `customfields` element.
 - Sessions and events with start and end: one `datetimerange` element (text `2026-11-06 23:30 – 01:30 +1`,
   value `['start' => int, 'end' => int]`, at most 24 hours, `set_default_duration()`), not two `datetime` elements.
 - Behat: `I set the following muform fields [in the "dialog[open]" "css_element"]:` and
@@ -72,16 +93,39 @@ Each of these cost a debugging round when the plugins were migrated from moodlef
 - `local\sql` - immutable SQL fragment with parameters. Write the whole query with `/* name */`
   placeholders, fill them with `replace_comment()` (throws when the placeholder is missing), use
   `wrap('AND ', '')` for optional parts (empty stays empty) and `sql::join()`. `?` and `:named`
-  parameters may be mixed, collisions are renamed. `"mdl_table"` works as `{table}`.
+  parameters may be mixed, collisions are renamed. `"mdl_table"` works as `{table}`. `sql::for_db(pgsql: ..., mariadb: ...[, db: $extdb])`
+  picks the variant for `$DB` or the given database, MariaDB/MySQL get the mariadb variant, all other databases
+  the pgsql one; plugins never mention "mysql".
 - `local\context_map` - fast capability lookups on system, tenant, category and course levels without
   walking the context tree: `get_contexts_by_capability_query()` (subquery of context ids, usually
   `wrap("JOIN (", ")capctx ON capctx.id = x.contextid")`) and `get_contexts_by_capability_join()`
   (`['join' => sql, 'where' => sql]`). Cache tables are rebuilt by `context_map_builder` (cron, events).
+  Activity and block contexts are never added to the map: speed is the whole point of it, and activities
+  hold most role overrides and prohibits.
+- `local\profilefield_cache` - cached custom profile field values (`tool_mulib_profilefield`: `charvalue`
+  for text and menu, trimmed and cut to 255 chars, `intvalue` for checkbox and datetime, defaults included,
+  visibility ignored). Use only fields that are ready (`is_ready()`), never read `user_info_data` for
+  filtering. Persistent usage must be recorded with `set_references(component, area, itemid, fieldids)`,
+  an empty list clears the item; referenced and identity fields cannot be removed from cache. Types come
+  from handlers in `local\profilefield\*` registered via `hook\profilefield_handlers`. Values are kept
+  current by observers and `task\profilefield_cron`; only profile field changes in admin UI queue adhoc
+  population (keeps UI fast), install, upgrade and CLI populate inline. Admin UI is settings page
+  `tool_mulib_profilefields` (Users > Accounts) with table setting `local\setting\profilefields`.
+  Generators do not trigger profile field events, Behat uses `all custom profile fields are cached`.
 - `local\mudb::upsert_record()` - concurrent-safe insert or update for tables with one unique index.
 - `local\mulib::is_<plugin>_available()` / `is_<plugin>_active()` - optional sibling plugins: muprog,
   mucertify, mutrain, murelatio, muhome, mutenancy, mucatalog.
+- `local\cohort_util` - cohort links and names and the two cohort permissions of MuTMS plugins:
+  `get_use_sql()` / `can_use()` (may select the cohort in forms: visible, `moodle/cohort:view` or "Use cohort" access
+  record of advanced cohorts) and `get_view_members_sql()` / `can_view_members()` (may list members:
+  `moodle/cohort:assign` or `tool/mucohort:viewmembers` for standard cohorts, `tool/mucohort:viewmembers` or "View members"
+  access record for advanced cohorts). Using does not include viewing of members. The rules are the same as in
+  tool_mucohort cohort types and are described in its README; web services must use `can_use()` like the forms.
 - `local\search_util` - search SQL for autocomplete sources (`get_search_query()`, cohort and user
-  search), `is_cohort_visible()`, `get_tenant_related_users_where()`, `format_user_label()`.
+  search), `get_tenant_related_users_where()`, `format_user_label()`.
+- `local\user_util` - account status rules (`is_suspendable()`, `is_unsuspendable()`) and `suspend()` / `unsuspend()`
+  through core APIs; no capability checks, callers check the capability that applies (site actions
+  `moodle/user:update` in user context, tenant actions their own).
 - `local\customfield_util::change_instances_context()` - move custom field data when an item moves.
 - `local\vendor_loader::register($vendordir)` - Composer libraries in plugin `vendor/` directories;
   never include a plugin's `vendor/autoload.php`.
@@ -106,13 +150,21 @@ if ($actions->has_items()) {
 ```
 
 - `output\entity_details`, `output\url_clipboard` - detail lists and copy-to-clipboard URLs.
-- `output\report_filter_bar` - always visible filter bar of system reports, every MuTMS report uses it.
-  Render it right before the report: `echo $OUTPUT->render(new report_filter_bar($report)); echo $report->output();`.
-  Text, select, boolean and date filters are edited in the bar, other types (course role, number, ...)
-  only in the core form, which moves into the bar as "Advanced filtering". New types: a branch in the PHP
-  constructor plus `isActive()`, `describe()`, `buildValues()` and the editor in `js/esm/src/reportbuilder/filterbar.ts`.
-  Core `set_filters` replaces all stored values, so every save sends all filters. Behat: `I press "+ Add filter"`,
-  click the filter name and value in `.tool_mulib-report-filter-bar-popover`, `Remove filter: <name>` button.
+- `output\expandable_text` - long descriptions collapsed to one line (native `details`): `new expandable_text($fullhtml, $short)`,
+  `$fullhtml` is always cleaned with `clean_text()`, html of templates needs `->allow_unsafe_rawhtml()`;
+  `$short` is plain text always cut to one line by the browser; NULL or blank collapses full texts
+  with tags or 100 and more characters, using their beginning as the short text; shorter plain text, also as one
+  editor paragraph, is printed whole. `expandable_text::is_empty($html)` detects editor content without text and media
+  (empty paragraphs, `&nbsp;`) - use it when storing descriptions as NULL.
+- `output\report_filter_bar` + `output\report_pager` - filter bar with pinned filters above and pager with record
+  count and download menu below system reports. Read `docs/reportbuilder.md` before adding a report, changing its
+  filters or writing Behat for it.
+
+```php
+echo $OUTPUT->render(new report_filter_bar($report, pinned: ['program:fullname' => null, 'program:archived' => null]));
+echo $report->output();
+echo $OUTPUT->render(new report_pager($report));
+```
 
 ### Entity tabs (secondary navigation)
 
@@ -126,7 +178,8 @@ and `initialise()`. See the program and certification pages in tool_muprog and t
 
 `tool_mulib_notification`, `tool_mulib_notification_user`, `tool_mulib_extdb_server`,
 `tool_mulib_extdb_query`, `tool_mulib_context_parent`, `tool_mulib_context_map` (caches),
-`tool_mulib_muform_wizard` (wizard state, rows older than a day are deleted).
+`tool_mulib_muform_wizard` (wizard state, rows older than a day are deleted),
+`tool_mulib_profilefield` (cache), `tool_mulib_profilefield_reference`.
 
 Capability: `tool/mulib:useextdb`.
 

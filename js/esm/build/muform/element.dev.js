@@ -12,6 +12,39 @@ var __name = (target, value) => __defProp(target, "name", { value, configurable:
  * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 const FOCUSABLE = 'input:not([type="hidden"]), select, textarea, button, a[href], [tabindex]:not([tabindex="-1"])';
+let pressedButton = null;
+let pressing = false;
+const afterPress = /* @__PURE__ */ new Set();
+let releaseTimer;
+const buttonOf = /* @__PURE__ */ __name((event) => event.target instanceof window.Element ? event.target.closest("button") : null, "buttonOf");
+const release = /* @__PURE__ */ __name(() => {
+  pressedButton = null;
+  pressing = false;
+  window.clearTimeout(releaseTimer);
+  const callbacks = Array.from(afterPress);
+  afterPress.clear();
+  for (const callback of callbacks) {
+    callback();
+  }
+}, "release");
+document.addEventListener("pointerdown", (event) => {
+  window.clearTimeout(releaseTimer);
+  pressing = true;
+  pressedButton = buttonOf(event);
+}, true);
+document.addEventListener("pointerup", (event) => {
+  if (pressedButton && buttonOf(event) !== pressedButton) {
+    release();
+    return;
+  }
+  releaseTimer = window.setTimeout(release, 500);
+}, true);
+document.addEventListener("click", () => {
+  window.setTimeout(release, 0);
+}, true);
+document.addEventListener("pointercancel", release, true);
+document.addEventListener("keydown", release, true);
+window.addEventListener("blur", release);
 class Element {
   static {
     __name(this, "Element");
@@ -45,8 +78,13 @@ class Element {
       if (!this.state.touched) {
         this.state.touched = true;
       }
-      const next = event.relatedTarget;
+      const related = event.relatedTarget;
+      const next = related instanceof HTMLButtonElement ? related : pressedButton ?? related;
       if (next instanceof HTMLButtonElement && next.form === wrapper.closest("form")) {
+        return;
+      }
+      if (pressing) {
+        afterPress.add(() => this.form.touched(this.name));
         return;
       }
       this.form.touched(this.name);

@@ -50,118 +50,111 @@ final class mudb {
 
         self::validate_upsert_record_arguments($table, $dataobject, $uniqueindexcolumns, $insertonlyfields);
 
-        if ($DB->get_dbfamily() === 'pgsql') {
-            self::upsert_record_pgsql($table, $dataobject, $uniqueindexcolumns, $insertonlyfields);
-            return;
-        } else if ($DB->get_dbfamily() === 'mysql') {
-            self::upsert_record_mysql($table, $dataobject, $uniqueindexcolumns, $insertonlyfields);
-            return;
+        $fields = [];
+        $params = [];
+        $pgsqlupdates = [];
+        $mariadbupdates = [];
+        foreach ((array)$dataobject as $field => $value) {
+            $fields[] = $field;
+            $params[] = $value;
+            if (!in_array($field, $uniqueindexcolumns)) {
+                $pgsqlupdates[] = "$field = EXCLUDED.$field";
+                $mariadbupdates[] = "$field = VALUES($field)";
+            }
         }
+        foreach ($insertonlyfields as $field => $value) {
+            $fields[] = $field;
+            $params[] = $value;
+        }
+        $insert = "INSERT INTO {{$table}} (" . implode(', ', $fields) . ")
+                   VALUES (" . implode(', ', array_fill(0, count($fields), '?')) . ")";
 
-        // NOTE: this is a fallback implementation for unsupported MS SQL Server.
+        $sql = sql::for_db(
+            pgsql: new sql(
+                "$insert ON CONFLICT (" . implode(', ', $uniqueindexcolumns) . ") DO UPDATE SET " . implode(', ', $pgsqlupdates),
+                $params
+            ),
+            mariadb: new sql("$insert ON DUPLICATE KEY UPDATE " . implode(', ', $mariadbupdates), $params)
+        );
+        $DB->execute($sql->sql, $sql->params);
+    }
 
+    /**
+     * Insert record unless there is already a record with the same values in unique index.
+     *
+     * Existing record is never modified.
+     *
+     * This method solves problems with concurrent inserts into tables with unique constraints,
+     * it is safe to use inside transactions.
+     *
+     * @param string $table
+     * @param stdClass|array $dataobject
+     * @param string[] $uniqueindexcolumns list of all columns in unique index
+     * @return bool true if record was inserted, false if record already existed
+     */
+    public static function insert_record_if_missing(string $table, stdClass|array $dataobject, array $uniqueindexcolumns): bool {
+        global $DB, $CFG;
+
+        $dataobject = (object)(array)$dataobject;
+
+        if (!$uniqueindexcolumns) {
+            throw new \core\exception\coding_exception(
+                'mudb::insert_record_if_missing() requires list of unique constraint columns'
+            );
+        }
+        if (property_exists($dataobject, 'id')) {
+            throw new \core\exception\coding_exception(
+                'mudb::insert_record_if_missing() dataobject must not have id property'
+            );
+        }
+        $columns = $DB->get_columns($table);
+        foreach ((array)$dataobject as $field => $value) {
+            if (!isset($columns[$field])) {
+                throw new \core\exception\coding_exception(
+                    'mudb::insert_record_if_missing() dataobject contains unknown column'
+                );
+            }
+        }
         $conditions = [];
         foreach ($uniqueindexcolumns as $column) {
+            if (!isset($dataobject->$column)) {
+                throw new \core\exception\coding_exception(
+                    'mudb::insert_record_if_missing() dataobject must have all unique columns set'
+                );
+            }
             $conditions[$column] = $dataobject->$column;
         }
-
-        $record = $DB->get_record($table, $conditions);
-        if ($record) {
-            $dataobject->id = $record->id;
-            $DB->update_record($table, $dataobject);
-        } else {
-            try {
-                if ($insertonlyfields) {
-                    $insertdata = (object)((array)$dataobject + $insertonlyfields);
-                } else {
-                    $insertdata = $dataobject;
+        if ($CFG->debugdeveloper) {
+            $found = false;
+            $expected = $uniqueindexcolumns;
+            sort($expected);
+            foreach ($DB->get_indexes($table) as $index) {
+                $indexcolumns = $index['columns'];
+                sort($indexcolumns);
+                if ($index['unique'] && $indexcolumns === $expected) {
+                    $found = true;
+                    break;
                 }
-                $DB->insert_record($table, $insertdata);
-            } catch (dml_write_exception $e) {
-                // Could be a concurrent insert trouble.
-                $record = $DB->get_record($table, $conditions);
-                if (!$record) {
-                    throw $e;
-                }
-                $dataobject->id = $record->id;
-                $DB->update_record($table, $dataobject);
+            }
+            if (!$found) {
+                throw new \core\exception\coding_exception(
+                    'mudb::insert_record_if_missing() unique index with given columns does not exist'
+                );
             }
         }
-    }
 
-    /**
-     * PostgreSQL UPSERT.
-     *
-     * @param string $table
-     * @param stdClass $dataobject
-     * @param string[] $uniqueindexcolumns list of all columns in unique index
-     * @param array $insertonlyfields additional fields with values to be used only for inserts
-     */
-    protected static function upsert_record_pgsql(string $table, stdClass $dataobject, array $uniqueindexcolumns, array $insertonlyfields): void {
-        global $DB;
-
-        $values = [];
-        $fields = [];
-        $params = [];
-        $updates = [];
-        foreach ((array)$dataobject as $field => $value) {
-            $params[] = $value;
-            $values[] = '?';
-            $fields[] = $field;
-            if (!in_array($field, $uniqueindexcolumns)) {
-                $updates[] = "$field = EXCLUDED.$field";
+        if ($DB->record_exists($table, $conditions)) {
+            return false;
+        }
+        try {
+            $DB->insert_record($table, $dataobject, false);
+        } catch (dml_write_exception $e) {
+            if (!$DB->record_exists($table, $conditions)) {
+                throw $e;
             }
+            return false;
         }
-        foreach ($insertonlyfields as $field => $value) {
-            $params[] = $value;
-            $values[] = '?';
-            $fields[] = $field;
-        }
-        $values = implode(',', $values);
-        $fields = implode(',', $fields);
-        $constraint = implode(',', $uniqueindexcolumns);
-        $updates = implode(', ', $updates);
-
-        $sql = "INSERT INTO {{$table}} ($fields) VALUES ($values)
-                            ON CONFLICT ($constraint) DO UPDATE SET $updates";
-        $DB->execute($sql, $params);
-    }
-
-    /**
-     * MySQL UPSERT.
-     *
-     * @param string $table
-     * @param stdClass $dataobject
-     * @param string[] $uniqueindexcolumns list of all columns in unique index
-     * @param array $insertonlyfields additional fields with values to be used only for inserts
-     */
-    protected static function upsert_record_mysql(string $table, stdClass $dataobject, array $uniqueindexcolumns, array $insertonlyfields): void {
-        global $DB;
-
-        $values = [];
-        $fields = [];
-        $params = [];
-        $updates = [];
-        foreach ((array)$dataobject as $field => $value) {
-            $params[] = $value;
-            $values[] = '?';
-            $fields[] = $field;
-            if (!in_array($field, $uniqueindexcolumns)) {
-                $updates[] = "$field = VALUES($field)";
-            }
-        }
-        foreach ($insertonlyfields as $field => $value) {
-            $params[] = $value;
-            $values[] = '?';
-            $fields[] = $field;
-        }
-        $values = implode(',', $values);
-        $fields = implode(',', $fields);
-        $updates = implode(', ', $updates);
-
-        $sql = "INSERT INTO {{$table}} ($fields) VALUES ($values)
-                            ON DUPLICATE KEY UPDATE $updates";
-        $DB->execute($sql, $params);
+        return true;
     }
 
     /**

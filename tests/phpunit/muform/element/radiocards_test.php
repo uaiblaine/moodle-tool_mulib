@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // phpcs:disable moodle.Files.BoilerplateComment.CommentEndedTooSoon
+// phpcs:disable moodle.Files.LineLength.TooLong
 
 namespace tool_mulib\phpunit\muform\element;
 
@@ -44,17 +45,15 @@ use PHPUnit\Framework\Attributes\Group;
 final class radiocards_test extends muform_testcase {
     /**
      * Add the tested element via hook.
-     *
-     * @param bool $required
      */
-    private function add_element(bool $required = false): void {
-        $hook = function (muform_definition $hook) use ($required): void {
-            $type = (new radiocards(
+    private function add_element(): void {
+        $hook = function (muform_definition $hook): void {
+            $type = new radiocards(
                 'type',
                 'Type',
                 ['standard' => 'Standard', 'curated' => 'Curated', 0 => 'Zero'],
                 ['curated' => 'Membership managed by <b>people</b>']
-            ))->set_required($required);
+            );
             $hook->form->add($type);
         };
         \core\di::get(\core\hook\manager::class)->phpunit_redirect_hook(muform_definition::class, $hook);
@@ -99,10 +98,6 @@ final class radiocards_test extends muform_testcase {
         $form = new simple_form($this->get_url(), []);
         $this->assertSame('0', $form->get_data()->type);
 
-        $this->simulate_post(simple_form::class, ['name' => 'x', 'type' => '', 'submit' => '1']);
-        $form = new simple_form($this->get_url(), []);
-        $this->assertNull($form->get_data()->type);
-
         $this->simulate_post(simple_form::class, ['name' => 'x', 'type' => 'rules', 'submit' => '1']);
         $form = new simple_form($this->get_url(), []);
         $this->assertTrue($form->is_invalid());
@@ -110,14 +105,21 @@ final class radiocards_test extends muform_testcase {
 
         $this->simulate_post(simple_form::class, ['name' => 'x', 'type' => ['curated'], 'submit' => '1']);
         $form = new simple_form($this->get_url(), []);
-        $this->assertNull($form->get_data()->type);
+        $this->assertTrue($form->is_invalid());
+        $this->assertSame([get_string('required')], $this->get_rendered_errors($form, 'type'));
     }
 
     public function test_required(): void {
-        $this->add_element(true);
+        $this->add_element();
 
         $this->simulate_post(simple_form::class, ['name' => 'x', 'type' => '', 'submit' => '1']);
         $form = new simple_form($this->get_url(), []);
+        $this->assertTrue($form->is_invalid());
+        $this->assertSame([get_string('required')], $this->get_rendered_errors($form, 'type'));
+
+        $this->simulate_post(simple_form::class, ['name' => 'x', 'submit' => '1']);
+        $form = new simple_form($this->get_url(), []);
+        $this->assertTrue($form->is_invalid());
         $this->assertSame([get_string('required')], $this->get_rendered_errors($form, 'type'));
 
         $this->simulate_post(simple_form::class, ['name' => 'x', 'type' => 'curated', 'submit' => '1']);
@@ -126,10 +128,24 @@ final class radiocards_test extends muform_testcase {
     }
 
     public function test_render(): void {
-        $this->add_element(true);
+        $this->add_element();
+        $form = new simple_form($this->get_url(), []);
+        $html = $this->render($form);
+        $s = $form->get_idsuffix();
+        $marker = '<div class="text-danger" title="' . get_string('required') . '"';
+        // Required markers of the text element 'name' and radiocards without selection.
+        $this->assertSame(2, substr_count($html, $marker));
+        $this->assertStringContainsString(
+            '<input type="radio" class="form-check-input" id="id_type' . $s . '_0" name="type" value="standard"'
+            . ' required aria-required="true">',
+            $html
+        );
+
         $form = new simple_form($this->get_url(), ['type' => 'curated']);
         $html = $this->render($form);
         $s = $form->get_idsuffix();
+        // Only the text element 'name' marker, radiocards with selection does not need it.
+        $this->assertSame(1, substr_count($html, $marker));
 
         $this->assertStringContainsString(
             '<div role="radiogroup" id="id_type' . $s . '" aria-labelledby="id_type' . $s . '_label"'
@@ -138,12 +154,12 @@ final class radiocards_test extends muform_testcase {
         );
         $this->assertStringContainsString(
             '<input type="radio" class="form-check-input" id="id_type' . $s . '_0" name="type" value="standard"'
-            . ' required aria-required="true">',
+            . ' required>',
             $html
         );
         $this->assertStringContainsString(
             '<input type="radio" class="form-check-input" id="id_type' . $s . '_1" name="type" value="curated"'
-            . ' aria-describedby="id_type' . $s . '_1_description" checked required aria-required="true">',
+            . ' aria-describedby="id_type' . $s . '_1_description" checked required>',
             $html
         );
         $this->assertStringContainsString('<label class="form-check-label" for="id_type' . $s . '_1">Curated</label>', $html);
@@ -176,6 +192,33 @@ final class radiocards_test extends muform_testcase {
 
         $hook = function (muform_definition $hook): void {
             $hook->form->add((new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']))->set_max_columns(1));
+        };
+        \core\di::get(\core\hook\manager::class)->phpunit_redirect_hook(muform_definition::class, $hook);
+        $html = $this->render(new simple_form($this->get_url(), []));
+        $this->assertStringContainsString(' class="w-100 muform-cards muform-cards-single">', $html);
+    }
+
+    public function test_min_column_width(): void {
+        $element = new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']);
+        $this->assertSame($element, $element->set_min_column_width(12.5));
+        try {
+            $element->set_min_column_width(0);
+            $this->fail('Exception expected');
+        } catch (coding_exception $ex) {
+            $this->assertStringContainsString('Card column width must be positive', $ex->getMessage());
+        }
+
+        $hook = function (muform_definition $hook): void {
+            $hook->form->add((new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']))->set_min_column_width(12.5));
+        };
+        \core\di::get(\core\hook\manager::class)->phpunit_redirect_hook(muform_definition::class, $hook);
+        $html = $this->render(new simple_form($this->get_url(), []));
+        $this->assertStringContainsString(' class="w-100 muform-cards muform-cards-fit" style="--muform-cards-min-width: 12.5rem">', $html);
+
+        // One column wins.
+        $hook = function (muform_definition $hook): void {
+            $hook->form->add((new radiocards('type', 'X', ['standard' => 'Standard', 'curated' => 'Curated']))
+                ->set_min_column_width(12)->set_max_columns(1));
         };
         \core\di::get(\core\hook\manager::class)->phpunit_redirect_hook(muform_definition::class, $hook);
         $html = $this->render(new simple_form($this->get_url(), []));

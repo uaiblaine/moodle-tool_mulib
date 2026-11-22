@@ -7,11 +7,23 @@
     "eject": "risky",
     "wrap": "risky"
   },
+  "muform/cohortpicker/panel": {
+    "eject": "risky",
+    "wrap": "risky"
+  },
   "muform/datetimepicker": {
     "eject": "risky",
     "wrap": "risky"
   },
+  "muform/pickerfilters": {
+    "eject": "risky",
+    "wrap": "risky"
+  },
   "muform/tagspicker": {
+    "eject": "risky",
+    "wrap": "risky"
+  },
+  "muform/userpicker/panel": {
     "eject": "risky",
     "wrap": "risky"
   }
