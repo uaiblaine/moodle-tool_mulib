@@ -92,6 +92,8 @@ abstract class element {
     private string $variant = '';
     /** @var bool element not visible in browser - managed via display manager */
     private bool $hidden = false;
+    /** @var bool changes reload the form in browser */
+    private bool $reloadonchange = false;
     /** @var bool element disabled in browser - managed via display manager */
     private bool $disabled = false;
 
@@ -325,6 +327,18 @@ abstract class element {
     }
 
     /**
+     * Reload the form in browser when the value changes, for definitions built from submitted values
+     * (see definition()); the form must have a reload button, which may be hidden.
+     *
+     * @param bool $state
+     * @return $this
+     */
+    final public function set_reload_on_change(bool $state = true): static {
+        $this->reloadonchange = $state;
+        return $this;
+    }
+
+    /**
      * Set initial hidden state in browser.
      *
      * @param bool $state
@@ -462,7 +476,7 @@ abstract class element {
      *
      * @return bool
      */
-    public static function is_cancelling(): bool {
+    public function is_cancelling(): bool {
         return false;
     }
 
@@ -473,7 +487,7 @@ abstract class element {
      *
      * @return bool
      */
-    public static function is_reloading(): bool {
+    public function is_reloading(): bool {
         return false;
     }
 
@@ -482,7 +496,7 @@ abstract class element {
      *
      * @return bool
      */
-    public static function is_submitting(): bool {
+    public function is_submitting(): bool {
         return false;
     }
 
@@ -636,6 +650,7 @@ abstract class element {
             'is_hidden' => $this->hidden,
             'is_disabled' => $this->disabled,
             'is_frozen' => $this->frozen,
+            'is_reloadonchange' => $this->reloadonchange && !$this->frozen,
             'is_required' => $this->requiredmarker,
             'attr_required' => $this->required,
             'attributes' => $this->get_html_attributes(),

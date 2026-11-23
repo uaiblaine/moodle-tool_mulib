@@ -81,4 +81,131 @@ describe('tool_mulib/muform/element', () => {
         expect(element.state.touched).toBe(true);
         expect(api.touchedNames).toEqual(['a']);
     });
+
+    it('validates elements left with a click after the mouse is released', () => {
+        // Forget presses of other tests.
+        document.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Shift'}));
+        const formel = form(wrap('a', 'custom', '<input id="id_a" name="a">'));
+        const api = fakeForm(formel);
+        const wrapper = formel.querySelector<HTMLElement>('[data-muform-name="a"]')!;
+        const element = new Element(wrapper, api);
+        const input = wrapper.querySelector('input')!;
+
+        // Also the element focused automatically when the form opened, an error now would move the click target.
+        document.body.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+        expect(element.state.touched).toBe(true);
+        expect(api.touchedNames).toEqual([]);
+        jest.useFakeTimers();
+        document.body.dispatchEvent(new MouseEvent('pointerup', {bubbles: true}));
+        expect(api.touchedNames).toEqual([]);
+        document.body.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+        jest.runAllTimers();
+        jest.useRealTimers();
+        expect(api.touchedNames).toEqual(['a']);
+
+        // Keyboard users get errors at once.
+        document.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Tab'}));
+        input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+        expect(api.touchedNames).toEqual(['a', 'a']);
+    });
+
+    it('validates elements left with a press that ends without a click', () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Shift'}));
+        const formel = form(wrap('a', 'custom', '<input id="id_a" name="a">'));
+        const api = fakeForm(formel);
+        const wrapper = formel.querySelector<HTMLElement>('[data-muform-name="a"]')!;
+        new Element(wrapper, api);
+        jest.useFakeTimers();
+        document.body.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        wrapper.querySelector('input')!.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+        document.body.dispatchEvent(new MouseEvent('pointerup', {bubbles: true}));
+        jest.advanceTimersByTime(499);
+        expect(api.touchedNames).toEqual([]);
+        jest.advanceTimersByTime(1);
+        jest.useRealTimers();
+        expect(api.touchedNames).toEqual(['a']);
+    });
+
+    it('does not report focusout caused by pressing a form button', () => {
+        const formel = form(wrap('a', 'custom', '<input id="id_a" name="a">') + '<button type="submit"><i>b</i></button>');
+        const api = fakeForm(formel);
+        const wrapper = formel.querySelector<HTMLElement>('[data-muform-name="a"]')!;
+        const element = new Element(wrapper, api);
+        const input = wrapper.querySelector('input')!;
+        const button = formel.querySelector('button')!;
+        const icon = button.querySelector('i')!;
+        const blur = (relatedTarget: EventTarget | null = null) =>
+            input.dispatchEvent(new FocusEvent('focusout', {bubbles: true, relatedTarget}));
+
+        // Chrome focuses the pressed button.
+        blur(button);
+        expect(element.state.touched).toBe(true);
+        expect(api.touchedNames).toEqual([]);
+
+        // Safari keeps buttons unfocused, the press is the only hint.
+        icon.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        blur(formel);
+        expect(api.touchedNames).toEqual([]);
+
+        // Mobile Safari moves focus after the touch ended, before the click.
+        icon.dispatchEvent(new MouseEvent('pointerup', {bubbles: true}));
+        blur();
+        expect(api.touchedNames).toEqual([]);
+
+        // The press is forgotten after the click.
+        formel.addEventListener('submit', (event) => event.preventDefault());
+        jest.useFakeTimers();
+        icon.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+        jest.runAllTimers();
+        jest.useRealTimers();
+        blur();
+        expect(api.touchedNames).toEqual(['a']);
+    });
+
+    it('forgets presses that do not end with a click', () => {
+        const formel = form(wrap('a', 'custom', '<input id="id_a" name="a">') + '<button type="submit">b</button>');
+        const api = fakeForm(formel);
+        const wrapper = formel.querySelector<HTMLElement>('[data-muform-name="a"]')!;
+        new Element(wrapper, api);
+        const input = wrapper.querySelector('input')!;
+        const button = formel.querySelector('button')!;
+        const blur = () => input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+
+        // Dragged off the button.
+        button.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        document.body.dispatchEvent(new MouseEvent('pointerup', {bubbles: true}));
+        blur();
+        expect(api.touchedNames).toEqual(['a']);
+
+        // Cancelled gesture, keyboard navigation and leaving the window.
+        for (const end of [
+            () => document.dispatchEvent(new Event('pointercancel', {bubbles: true})),
+            () => document.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Tab'})),
+            () => window.dispatchEvent(new Event('blur')),
+        ]) {
+            button.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+            end();
+            blur();
+        }
+        expect(api.touchedNames).toEqual(['a', 'a', 'a', 'a']);
+    });
+
+    it('ignores a pressed button of another form when focus moves to a button of this form', () => {
+        const formel = form(wrap('a', 'custom', '<input id="id_a" name="a">') + '<button type="submit">b</button>');
+        const other = document.createElement('form');
+        other.innerHTML = '<button type="button">x</button>';
+        document.body.appendChild(other);
+        const api = fakeForm(formel);
+        const wrapper = formel.querySelector<HTMLElement>('[data-muform-name="a"]')!;
+        new Element(wrapper, api);
+        const input = wrapper.querySelector('input')!;
+
+        other.querySelector('button')!.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        input.dispatchEvent(new FocusEvent('focusout', {bubbles: true, relatedTarget: formel.querySelector('button')}));
+        expect(api.touchedNames).toEqual([]);
+        document.dispatchEvent(new Event('pointercancel', {bubbles: true}));
+        other.remove();
+    });
+
 });

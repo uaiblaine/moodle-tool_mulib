@@ -31,6 +31,14 @@
         grid-column: 1 / -1;
     }
 }
+/* Two columns whenever each fits the minimum width (set_min_column_width()), never more than two. */
+.muform .muform-cards.muform-cards-fit {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, max(var(--muform-cards-min-width), calc((100% - 0.5rem) / 2))), 1fr));
+}
+.muform .muform-cards.muform-cards-fit > .muform-cards-group {
+    grid-column: 1 / -1;
+}
 .muform .muform-card {
     position: relative;
     margin: 0;
@@ -452,4 +460,90 @@ dialog.muform-dialog .modal-body {
 
 .tool_mulib-report-filter-bar .reportbuilder-filters-sidebar {
     max-height: 60vh;
+}
+
+/* Report pager: it replaces the core paging bar, the "Show all" link and the download form of the report table. */
+.tool_mulib-report-pager-active nav.pagination,
+.tool_mulib-report-pager-active [data-action="showcount"],
+.tool_mulib-report-pager-download .dataformatselector {
+    display: none;
+}
+
+/* Collapsible form sections, see tool_mulib\muform\element\collapsible - Bootstrap accordion on details/summary. */
+.muform .muform-collapsible > summary {
+    list-style: none;
+    cursor: pointer;
+}
+.muform .muform-collapsible > summary::-webkit-details-marker {
+    display: none;
+}
+.muform .muform-collapsible:not([open]) > summary.accordion-button {
+    color: var(--bs-accordion-btn-color);
+    background-color: var(--bs-accordion-btn-bg);
+    box-shadow: none;
+}
+.muform .muform-collapsible:not([open]) > summary.accordion-button::after {
+    background-image: var(--bs-accordion-btn-icon);
+    transform: none;
+}
+.muform .muform-collapsible:not([open]):last-of-type > summary.accordion-button {
+    border-bottom-right-radius: var(--bs-accordion-inner-border-radius);
+    border-bottom-left-radius: var(--bs-accordion-inner-border-radius);
+}
+.muform .muform-collapsible:first-of-type > summary.accordion-button {
+    border-top-left-radius: var(--bs-accordion-inner-border-radius);
+    border-top-right-radius: var(--bs-accordion-inner-border-radius);
+}
+
+/* Text collapsed to one line, see tool_mulib\output\expandable_text. */
+.tool_mulib-expandable-text > summary {
+    cursor: pointer;
+}
+.tool_mulib-expandable-text[open] > summary {
+    margin-bottom: 0.5rem;
+}
+/* The short text guessed from the full text would only repeat its beginning. */
+.tool_mulib-expandable-text-guessed[open] > summary {
+    margin-bottom: 0;
+}
+.tool_mulib-expandable-text-guessed[open] > summary > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+}
+
+/* Picker panels: a modal dialog over the right half of the screen, the form stays visible on the left. */
+dialog.tool_mulib-picker-panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: 50vw;
+    min-width: 36rem;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid var(--bs-border-color);
+    background: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    box-shadow: var(--bs-box-shadow-lg);
+}
+
+@media (max-width: 36rem) {
+    dialog.tool_mulib-picker-panel {
+        width: 100vw;
+        min-width: 0;
+    }
+}
+
+dialog.tool_mulib-picker-panel::backdrop {
+    background: rgba(0, 0, 0, .15);
+}
+
+dialog.tool_mulib-picker-panel thead th {
+    background: var(--bs-body-bg);
 }

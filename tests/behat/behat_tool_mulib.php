@@ -41,6 +41,19 @@ require_once(__DIR__ . '/../classes/muform/element/base.php');
  */
 class behat_tool_mulib extends behat_base {
     /**
+     * Reset static caches of user properties before every scenario.
+     *
+     * The list of installed languages and other choices are cached statically in \core\user,
+     * PHPUnit resets them after each test, but Behat does not and its CLI process
+     * is shared by all scenarios, so stale choices would leak from the previous scenarios.
+     *
+     * @BeforeScenario
+     */
+    public function reset_user_caches(): void {
+        \core\user::reset_caches();
+    }
+
+    /**
      * Migration aid: core form steps used on a page with a muform fail, which is how tests
      * that still drive a migrated form with legacy steps are found.
      *
@@ -155,6 +168,16 @@ class behat_tool_mulib extends behat_base {
         }
 
         $this->look_for_exceptions();
+    }
+
+    /**
+     * Add all supported custom profile fields to cache and populate them.
+     *
+     * @Given all custom profile fields are cached
+     */
+    public function cache_all_profile_fields(): void {
+        \tool_mulib\local\profilefield_cache::add_supported_fields();
+        \tool_mulib\local\profilefield_cache::populate_pending_fields(new \null_progress_trace());
     }
 
     /**

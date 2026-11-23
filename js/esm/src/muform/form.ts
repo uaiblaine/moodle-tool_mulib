@@ -26,6 +26,7 @@
 
 import Pending from '@moodle/lms/core/pending';
 import {requireAsync} from '@moodle/lms/core/amd';
+import {getString} from '@moodle/lms/core/stringUtils';
 import DisplayManager from './display';
 import type {ChangeDetail, DisplayRule, ElementConstructor, ElementLike, FormApi, FormEvent, Value} from './types';
 
@@ -50,6 +51,14 @@ export function setModuleLoader(loader: (specifier: string) => Promise<unknown>)
 }
 
 /** Subset of core_form/changechecker used here. */
+/** Subset of core/notification. */
+interface Notification {
+    saveCancelPromise(title: string, question: string, saveLabel: string): Promise<void>;
+}
+
+/** Collapsible sections, see tool_mulib\\muform\\element\\collapsible. */
+const COLLAPSIBLE_SELECTOR = 'details.muform-collapsible';
+
 interface ChangeChecker {
     watchForm(form: HTMLFormElement): void;
     markFormSubmitted(form: HTMLFormElement): void;
@@ -140,9 +149,13 @@ export class MuForm implements FormApi {
             this.elements.set(name, new module.default(wrapper, this));
         }
 
+        // Values rendered by the server may already differ from what is saved.
+        this.changed = this.form.dataset.muformChanged === '1';
+
         const rules = JSON.parse(this.form.dataset.muformRules || '[]') as DisplayRule[];
         this.display = new DisplayManager(this.elements, rules);
         this.display.apply();
+        this.initSections();
 
         this.form.addEventListener('muform:change', (event) => this.onChange((event as CustomEvent<ChangeDetail>).detail));
         this.form.addEventListener('submit', (event) => this.onSubmit(event));
@@ -155,7 +168,7 @@ export class MuForm implements FormApi {
         try {
             this.changechecker = await requireAsync<ChangeChecker>('core_form/changechecker');
             this.changechecker.watchForm(this.form);
-            if (this.form.dataset.muformDirty === '1') {
+            if (this.form.dataset.muformDirty === '1' || this.changed) {
                 this.changechecker.markFormAsDirty(this.form);
             }
         } catch {
@@ -211,6 +224,7 @@ export class MuForm implements FormApi {
         if (errors.join('\n') !== element.state.errors.join('\n')) {
             element.state.errors = errors;
             element.syncUI();
+            this.syncSections(false);
         }
     }
 
@@ -246,6 +260,7 @@ export class MuForm implements FormApi {
                 element.syncUI();
             }
         }
+        this.syncSections(!valid);
         return valid;
     }
 
@@ -256,6 +271,11 @@ export class MuForm implements FormApi {
         for (const element of this.elements.values()) {
             const area = element.wrapper.querySelector('.invalid-feedback, .alert-danger');
             if (element.state.errors.length || (area && area.textContent?.trim())) {
+                // Collapsed sections never hide errors.
+                for (let section = element.wrapper.closest<HTMLDetailsElement>(COLLAPSIBLE_SELECTOR); section;
+                    section = section.parentElement?.closest<HTMLDetailsElement>(COLLAPSIBLE_SELECTOR) ?? null) {
+                    section.open = true;
+                }
                 element.focus();
                 return;
             }
@@ -303,13 +323,20 @@ export class MuForm implements FormApi {
     }
 
     /**
-     * Re-evaluate display rules when a dependency changed.
+     * Reload the form when an element marked with set_reload_on_change() changed,
+     * otherwise re-evaluate display rules when a dependency changed.
      *
      * @param detail change detail
      */
     private onChange(detail: ChangeDetail): void {
         this.changed = true;
         this.emit('change', detail);
+        const selector = `[data-muform-name="${CSS.escape(detail.name)}"][data-muform-reload-on-change]`;
+        if (this.form.querySelector(selector)) {
+            // The server builds the rest of the definition from the new value.
+            this.reload();
+            return;
+        }
         if (this.display?.dependsOn(detail.name)) {
             const changed = this.display.apply();
             if (changed.length) {
@@ -354,7 +381,23 @@ export class MuForm implements FormApi {
             return;
         }
         const submitter = event.submitter as HTMLButtonElement | null;
-        const role = submitter?.dataset.muformRole ?? 'submit';
+        if (submitter?.dataset.muformConfirm) {
+            if (submitter.dataset.muformConfirmed === '1') {
+                delete submitter.dataset.muformConfirmed;
+            } else {
+                event.preventDefault();
+                this.confirmSubmit(submitter, submitter.dataset.muformConfirm);
+                return;
+            }
+        }
+        let role = submitter?.dataset.muformRole ?? 'submit';
+        if (submitter?.dataset.muformSubmitIfChanged === '1') {
+            // Wizard Back: changed values are validated and stored, otherwise the form is only reloaded.
+            submitter.value = this.changed ? 'validate' : '1';
+            if (this.changed) {
+                role = 'submit';
+            }
+        }
         if (role === 'submit') {
             this.submitAttempted = true;
             if (!this.validateAll()) {
@@ -377,6 +420,86 @@ export class MuForm implements FormApi {
                 button.disabled = true;
             }
         }, 0);
+    }
+
+    /**
+     * Ask for confirmation, then submit with the same button.
+     *
+     * @param submitter the pressed button
+     * @param question confirmation question
+     */
+    private async confirmSubmit(submitter: HTMLButtonElement, question: string): Promise<void> {
+        const pending = new Pending('tool_mulib/muform:confirm');
+        try {
+            const notification = await requireAsync<Notification>('core/notification');
+            const [title, label] = await Promise.all([getString('confirm', 'core'), getString('yes', 'core')]);
+            pending.resolve();
+            await notification.saveCancelPromise(title, question, label);
+        } catch {
+            // Cancelled.
+            pending.resolve();
+            return;
+        }
+        submitter.dataset.muformConfirmed = '1';
+        this.form.requestSubmit(submitter);
+    }
+
+    /**
+     * Add expand and collapse all links above the first collapsible section when there are more of them.
+     */
+    private initSections(): void {
+        const sections = Array.from(this.form.querySelectorAll<HTMLDetailsElement>(COLLAPSIBLE_SELECTOR));
+        if (sections.length < 2) {
+            return;
+        }
+        const toolbar = document.createElement('div');
+        toolbar.className = 'muform-collapsible-toolbar d-flex justify-content-end gap-3 mb-2';
+        const addButton = (identifier: string, open: boolean) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-link p-0';
+            getString(identifier, 'core').then((text) => {
+                button.textContent = text;
+                return text;
+            }).catch(() => undefined);
+            button.addEventListener('click', () => {
+                for (const section of sections) {
+                    section.dispatchEvent(new CustomEvent('muform:collapsible', {detail: {open}}));
+                }
+            });
+            toolbar.append(button);
+        };
+        addButton('expandall', true);
+        addButton('collapseall', false);
+        sections[0].before(toolbar);
+    }
+
+    /**
+     * Show error indicators in headers of collapsible sections that contain errors.
+     *
+     * @param open also expand them, after a failed submission
+     */
+    private syncSections(open: boolean): void {
+        const witherrors = new Set<Element>();
+        for (const element of this.elements.values()) {
+            const area = element.wrapper.querySelector('.invalid-feedback, .alert-danger');
+            if (!element.state.errors.length && !(area && area.textContent?.trim())) {
+                continue;
+            }
+            for (let section = element.wrapper.parentElement?.closest(COLLAPSIBLE_SELECTOR) ?? null; section;
+                section = section.parentElement?.closest(COLLAPSIBLE_SELECTOR) ?? null) {
+                witherrors.add(section);
+            }
+        }
+        for (const section of this.form.querySelectorAll<HTMLDetailsElement>(COLLAPSIBLE_SELECTOR)) {
+            const indicator = section.querySelector<HTMLElement>(':scope > summary .muform-collapsible-errors');
+            if (indicator) {
+                indicator.hidden = !witherrors.has(section);
+            }
+            if (open && witherrors.has(section)) {
+                section.open = true;
+            }
+        }
     }
 
     /**

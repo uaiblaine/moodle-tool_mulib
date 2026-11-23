@@ -25,15 +25,15 @@
 use tool_mulib\muform\element\buttons;
 use tool_mulib\muform\element\cancel;
 use tool_mulib\muform\element\filemanager;
-use tool_mulib\muform\element\submit;
 use tool_mulib\muform\element\text;
+use tool_mulib\muform\element\wizardcontinue;
 use tool_mulib\muform\form;
 
 defined('MOODLE_INTERNAL') || die();
 defined('BEHAT_SITE_RUNNING') || die();
 
 /**
- * Stage 1: details.
+ * Stage 1: details, read-only when it is locked.
  *
  * @package     tool_mulib
  * @copyright   2026 Petr Skoda
@@ -42,13 +42,15 @@ defined('BEHAT_SITE_RUNNING') || die();
 final class tool_mulib_muform_wizard_details_form extends form {
     #[\Override]
     protected function definition(): void {
+        $locked = !empty($this->get_extra_data()['locked']);
         $fullname = (new text('fullname', 'Full name'))
-            ->set_required(true);
+            ->set_required(true)
+            ->set_frozen($locked);
         $this->add($fullname);
-        $this->add(new filemanager('attachments', 'Attachments', 1, ['.txt']));
+        $this->add((new filemanager('attachments', 'Attachments', 1, ['.txt']))->set_frozen($locked));
 
         $this->add(new buttons('buttons'));
-        $this->add(new submit('submit', 'Continue'), 'buttons');
+        $this->add(new wizardcontinue(), 'buttons');
         $this->add(new cancel(), 'buttons');
     }
 }

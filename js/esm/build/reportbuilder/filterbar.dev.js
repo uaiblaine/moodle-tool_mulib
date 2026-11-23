@@ -3,8 +3,8 @@ var __name = (target, value) => __defProp(target, "name", { value, configurable:
 /**
  * Always visible filter bar of a system report.
  *
- * Active filters are shown as buttons with their values, inactive filters are collapsed
- * in an "add filter" menu, the core filters form is available as "Advanced filters" button.
+ * Active filters are shown as buttons with their values, pinned filters are shown always,
+ * other inactive filters are collapsed in an "add filter" menu, the core filters form is available as "Advanced filters" button.
  * Values are stored through the standard report builder web services
  * and the report table is reloaded without page reload.
  *
@@ -28,6 +28,7 @@ const SELECT_EQUAL_TO = 1;
 const BOOLEAN_YES = 1;
 const BOOLEAN_NO = 2;
 const TABLE_RELOAD = "core_reportbuilder_table_reload";
+const FILTERS_CHANGED = "tool_mulib/reportbuilder:filterschanged";
 const TEXT_IS_EMPTY = 7;
 const TEXT_IS_NOT_EMPTY = 8;
 const DATE_NOT_EMPTY = 1;
@@ -45,6 +46,12 @@ const DATE_RELATIVE = [DATE_LAST, DATE_NEXT, DATE_BEFORE, DATE_AFTER];
 const DATE_UNIT_NAMES = { "5": "minute", "0": "hour", "1": "day", "2": "week", "3": "month", "4": "year" };
 const SEARCH_THRESHOLD = 10;
 const fill = /* @__PURE__ */ __name((template, value) => template.replace("{$a}", () => value), "fill");
+const decodeEntities = /* @__PURE__ */ __name((html) => {
+  if (!html.includes("&")) {
+    return html;
+  }
+  return new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
+}, "decodeEntities");
 const formatUnits = /* @__PURE__ */ __name((count, unit, settings) => {
   const lang = (settings?.lang ?? "en").replace("_", "-");
   try {
@@ -69,6 +76,9 @@ const formatUnitName = /* @__PURE__ */ __name((unit, settings) => {
 const isActive = /* @__PURE__ */ __name((filter) => {
   if (filter.type === "other") {
     return filter.active === true;
+  }
+  if (filter.type === "checkboxes") {
+    return (filter.checked ?? []).length > 0;
   }
   if (filter.operator === ANY_VALUE) {
     return false;
@@ -95,6 +105,10 @@ const describe = /* @__PURE__ */ __name((filter, strings, settings = null) => {
   }
   if (filter.type === "date") {
     return describeDate(filter, strings, settings);
+  }
+  if (filter.type === "checkboxes") {
+    const checked = filter.checked ?? [];
+    return filter.options.filter((option) => checked.includes(option.value)).map((option) => option.label).join(", ");
   }
   let value = filter.value;
   if (filter.type === "select") {
@@ -124,6 +138,13 @@ const describeDate = /* @__PURE__ */ __name((filter, strings, settings) => {
   }
   return label;
 }, "describeDate");
+const buttonLabel = /* @__PURE__ */ __name((filter, strings, settings = null) => {
+  if (!isActive(filter)) {
+    return filter.label + ": " + (filter.anylabel ?? "");
+  }
+  const description = describe(filter, strings, settings);
+  return description === "" ? filter.label : filter.label + ": " + description;
+}, "buttonLabel");
 const buildValues = /* @__PURE__ */ __name((filters) => {
   const values = {};
   for (const filter of filters) {
@@ -134,14 +155,13 @@ const buildValues = /* @__PURE__ */ __name((filters) => {
       }
       continue;
     }
+    if (filter.type === "checkboxes") {
+      values[filter.key + "_values"] = active ? [...filter.checked ?? []] : [];
+      continue;
+    }
     values[filter.key + "_operator"] = active ? filter.operator : ANY_VALUE;
     if (filter.type === "date") {
-      const relative = active && (DATE_RELATIVE.includes(filter.operator) || filter.operator === DATE_CURRENT);
-      const range = active && filter.operator === DATE_RANGE;
-      values[filter.key + "_value"] = relative && DATE_RELATIVE.includes(filter.operator) ? Number(filter.value) : 1;
-      values[filter.key + "_unit"] = relative ? filter.unit ?? DATE_UNIT_DAY : DATE_UNIT_DAY;
-      values[filter.key + "_from"] = range ? filter.from ?? 0 : 0;
-      values[filter.key + "_to"] = range ? filter.to ?? 0 : 0;
+      Object.assign(values, buildDateValues(filter, active));
       continue;
     }
     if (filter.type !== "boolean") {
@@ -150,6 +170,23 @@ const buildValues = /* @__PURE__ */ __name((filters) => {
   }
   return values;
 }, "buildValues");
+const buildDateValues = /* @__PURE__ */ __name((filter, active) => {
+  const relative = active && (DATE_RELATIVE.includes(filter.operator) || filter.operator === DATE_CURRENT);
+  const range = active && filter.operator === DATE_RANGE;
+  return {
+    [filter.key + "_value"]: relative && DATE_RELATIVE.includes(filter.operator) ? Number(filter.value) : 1,
+    [filter.key + "_unit"]: relative ? filter.unit ?? DATE_UNIT_DAY : DATE_UNIT_DAY,
+    [filter.key + "_from"]: range ? filter.from ?? 0 : 0,
+    [filter.key + "_to"]: range ? filter.to ?? 0 : 0
+  };
+}, "buildDateValues");
+const isDefault = /* @__PURE__ */ __name((filter) => {
+  if (!filter.default) {
+    return false;
+  }
+  return JSON.stringify(buildValues([filter])) === JSON.stringify(buildValues([{ ...filter, ...filter.default }]));
+}, "isDefault");
+const isInitial = /* @__PURE__ */ __name((filter) => filter.default ? isDefault(filter) : !isActive(filter), "isInitial");
 class FilterBar {
   static {
     __name(this, "FilterBar");
@@ -172,6 +209,15 @@ class FilterBar {
     this.reportId = Number(root.dataset.reportId);
     this.parameters = root.dataset.reportParameters ?? "[]";
     this.filters = JSON.parse(root.dataset.filters ?? "[]");
+    for (const filter of this.filters) {
+      filter.label = decodeEntities(filter.label);
+      if (filter.anylabel !== void 0) {
+        filter.anylabel = decodeEntities(filter.anylabel);
+      }
+      for (const option of filter.options) {
+        option.label = decodeEntities(option.label);
+      }
+    }
     this.datetime = JSON.parse(root.dataset.datetime || "null");
     this.strings = strings;
     this.root.style.position = "relative";
@@ -252,6 +298,9 @@ class FilterBar {
       filter.active = false;
       filter.values = {};
     }
+    if (filter.type === "checkboxes") {
+      filter.checked = [];
+    }
   }
   /** Render buttons of the bar. */
   render() {
@@ -259,7 +308,8 @@ class FilterBar {
     this.root.replaceChildren();
     const inactive = [];
     for (const filter of this.filters) {
-      if (!isActive(filter)) {
+      const active = isActive(filter);
+      if (!active && !filter.pinned) {
         if (filter.type !== "other") {
           inactive.push(filter);
         }
@@ -268,24 +318,39 @@ class FilterBar {
       const group = document.createElement("div");
       group.className = "btn-group btn-group-sm";
       group.dataset.filterKey = filter.key;
-      const description = describe(filter, this.strings, this.datetime);
-      const edit = this.button(description === "" ? filter.label : filter.label + ": " + description, "btn btn-primary");
+      const edit = this.button(
+        buttonLabel(filter, this.strings, this.datetime),
+        active ? "btn btn-primary" : "btn btn-outline-secondary"
+      );
       edit.addEventListener("click", () => this.openEditor(filter, group));
       group.append(edit);
-      const remove = this.button("\xD7", "btn btn-primary");
-      remove.setAttribute("aria-label", this.strings.remove + ": " + filter.label);
-      remove.title = this.strings.remove;
-      remove.addEventListener("click", () => {
-        this.clear(filter);
-        void this.save();
-      });
-      group.append(remove);
+      if (active) {
+        const remove = this.button("\xD7", "btn btn-primary");
+        remove.setAttribute("aria-label", this.strings.remove + ": " + filter.label);
+        remove.title = this.strings.remove;
+        remove.addEventListener("click", () => {
+          this.clear(filter);
+          void this.save();
+        });
+        group.append(remove);
+      }
       this.root.append(group);
     }
     if (inactive.length) {
       const more = this.button("+ " + this.strings.add, "btn btn-sm btn-outline-secondary");
       more.addEventListener("click", () => this.openMore(inactive, more));
       this.root.append(more);
+    }
+    if (!this.filters.every(isInitial)) {
+      const reset = this.button("\u21BA " + this.strings.resetall, "btn btn-sm btn-link");
+      reset.addEventListener("click", () => {
+        for (const filter of this.filters) {
+          this.clear(filter);
+          Object.assign(filter, filter.default);
+        }
+        void this.save();
+      });
+      this.root.append(reset);
     }
     if (this.coreFilters) {
       this.root.append(this.coreFilters);
@@ -368,6 +433,12 @@ class FilterBar {
    * @param anchor
    */
   openEditor(filter, anchor) {
+    const advanced = this.coreFilters?.querySelector("#dropdownFiltersButton");
+    if (filter.type === "other" && filter.pinned && advanced) {
+      this.closePopover();
+      setTimeout(() => advanced.click(), 0);
+      return;
+    }
     const content = document.createElement("div");
     const title = document.createElement(filter.type === "text" ? "label" : "div");
     title.className = "fw-bold mb-2";
@@ -402,10 +473,13 @@ class FilterBar {
       content.append(form);
     } else if (filter.type === "date") {
       content.append(this.dateEditor(filter));
+    } else if (filter.type === "checkboxes") {
+      content.append(this.checkboxesEditor(filter));
     } else if (filter.type === "boolean") {
       const group = document.createElement("div");
       group.className = "d-flex gap-2";
-      for (const [operator, text] of [[BOOLEAN_YES, this.strings.yes], [BOOLEAN_NO, this.strings.no]]) {
+      const choices = filter.options.length ? filter.options.map((option) => [Number(option.value), option.label]) : [[BOOLEAN_YES, this.strings.yes], [BOOLEAN_NO, this.strings.no]];
+      for (const [operator, text] of choices) {
         const selected = filter.operator === operator;
         const button = this.button(text, selected ? "btn btn-sm btn-primary" : "btn btn-sm btn-outline-primary");
         button.addEventListener("click", () => {
@@ -449,6 +523,15 @@ class FilterBar {
       renderOptions("");
       content.append(list);
     }
+    if (filter.default && !isDefault(filter)) {
+      const reset = this.button(this.strings.resetdefault, "btn btn-sm btn-link px-0 mt-2");
+      reset.addEventListener("click", () => {
+        delete filter.operatorlabel;
+        Object.assign(filter, filter.default);
+        void this.save();
+      });
+      content.append(reset);
+    }
     this.openPopover(anchor, content);
   }
   /**
@@ -482,6 +565,43 @@ class FilterBar {
       select.append(new Option(option.label, option.value, false, option.value === value));
     }
     return select;
+  }
+  /**
+   * Editor of checkboxes filter, applied together so that the report is reloaded once.
+   *
+   * @param filter
+   * @returns form
+   */
+  checkboxesEditor(filter) {
+    const form = document.createElement("form");
+    const checked = filter.checked ?? [];
+    const inputs = [];
+    filter.options.forEach((option, index) => {
+      const item = document.createElement("div");
+      item.className = "form-check";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.className = "form-check-input";
+      input.id = this.root.id + "-option-" + index;
+      input.value = option.value;
+      input.checked = checked.includes(option.value);
+      const label = document.createElement("label");
+      label.className = "form-check-label";
+      label.htmlFor = input.id;
+      label.textContent = option.label;
+      item.append(input, label);
+      form.append(item);
+      inputs.push(input);
+    });
+    const apply = this.button(this.strings.apply, "btn btn-sm btn-primary mt-2");
+    apply.type = "submit";
+    form.append(apply);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      filter.checked = inputs.filter((input) => input.checked).map((input) => input.value);
+      void this.save();
+    });
+    return form;
   }
   /**
    * Editor of date filter.
@@ -714,6 +834,10 @@ class FilterBar {
         }
       });
       this.reload();
+      this.getReport()?.dispatchEvent(new CustomEvent(FILTERS_CHANGED, {
+        bubbles: true,
+        detail: { count: this.filters.filter(isActive).length }
+      }));
       await this.refreshCoreFilters();
     } finally {
       pending.resolve();
@@ -733,6 +857,8 @@ const initFilterBar = /* @__PURE__ */ __name(async (root) => {
       remove,
       apply,
       useadvanced,
+      resetdefault,
+      resetall,
       rangefrom,
       rangeto,
       search,
@@ -751,6 +877,8 @@ const initFilterBar = /* @__PURE__ */ __name(async (root) => {
       { key: "filterbar_remove", component: "tool_mulib" },
       { key: "filterbar_apply", component: "tool_mulib" },
       { key: "filterbar_useadvanced", component: "tool_mulib" },
+      { key: "filterbar_resetdefault", component: "tool_mulib" },
+      { key: "filterbar_resetall", component: "tool_mulib" },
       { key: "filterbar_rangefrom", component: "tool_mulib" },
       { key: "filterbar_rangeto", component: "tool_mulib" },
       { key: "search", component: "core" },
@@ -770,6 +898,8 @@ const initFilterBar = /* @__PURE__ */ __name(async (root) => {
       remove,
       apply,
       useadvanced,
+      resetdefault,
+      resetall,
       search,
       yes,
       no,
@@ -802,15 +932,20 @@ export {
   DATE_PAST,
   DATE_RANGE,
   DATE_UNIT_DAY,
+  FILTERS_CHANGED,
   SELECT_EQUAL_TO,
   TEXT_CONTAINS,
   TEXT_IS_EMPTY,
   TEXT_IS_NOT_EMPTY,
   buildValues,
+  buttonLabel,
+  decodeEntities,
   describe,
   formatUnitName,
   formatUnits,
   initFilterBar,
-  isActive
+  isActive,
+  isDefault,
+  isInitial
 };
 //# sourceMappingURL=filterbar.dev.js.map

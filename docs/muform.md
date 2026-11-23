@@ -167,6 +167,12 @@ download, also in a dialog.
 | `editor`           | `(name, label, maxfiles = 0, allowsubdirs = false, attributes)`              | `string` text, plus `<name>format` and `<name>draftitemid` | blank text       |
 | `autocomplete`     | `(name, label, source, attributes)`                                          | `string` value or `null`                                   | `null`           |
 | `autocompletemany` | `(name, label, source, attributes)`                                          | `string[]` values                                          | `[]`             |
+| `picker`           | `(name, label, source)`                                                      | `string` value or `null`                                   | `null`           |
+| `pickermany`       | `(name, label, source)`                                                      | `string[]` values                                          | `[]`             |
+| `userpicker`       | `(name, label, source)`                                                      | user id `string` or `null`                                 | `null`           |
+| `userpickermany`   | `(name, label, source)`                                                      | `string[]` user ids                                        | `[]`             |
+| `cohortpicker`     | `(name, label, source)`                                                      | cohort id `string` or `null`                               | `null`           |
+| `cohortpickermany` | `(name, label, source)`                                                      | `string[]` cohort ids                                      | `[]`             |
 | `tags`             | `(name, label, tagarea, attributes)`                                         | `string[]` tag names                                       | `[]`             |
 | `checkbox`         | `(name, label, text, attributes)`                                            | `1` or `0`                                                 | `0`              |
 | `yesno`            | `(name, label)`                                                              | `1` or `0`                                                 | never empty      |
@@ -180,6 +186,7 @@ download, also in a dialog.
 | `info`             | `(name, label, default = null, format = info::STRING)`                       | not returned                                               |                  |
 | `inforawhtml`      | `(name, label, html)`                                                        | not returned                                               |                  |
 | `section`          | `(name, label)`                                                              | not returned                                               |                  |
+| `collapsible`      | `(name, label, statekey = null)`                                             | not returned                                               |                  |
 | `customfields`     | `(name, handler, instanceid)`                                                | not returned, see [Custom fields](#custom-fields)          |                  |
 | `buttons`          | `(name)`                                                                     | not returned                                               |                  |
 | `submit`, `cancel` | `(name = 'submit'/'cancel', label = null)`                                   | not returned                                               |                  |
@@ -344,15 +351,26 @@ $form->get_element('description')->save_area();
 ### Autocomplete
 
 `autocomplete` picks one value, `autocompletemany` a list. Both get a source object that decides
-everything. Its constructor takes plain ids and checks access. `search()` finds options,
-`label()` or `labels()` return labels for stored values, and `validate()` can refuse a value with a
-reason. `get_args()` returns the constructor arguments, so the shared endpoint in tool_mulib can
+everything, and the same source class serves both elements. Sources live in
+`<component>\muform\autocomplete\` and extend `tool_mulib\muform\autocomplete\base`. The constructor
+takes plain ids and checks access, `get_args()` returns them, so the shared endpoint in tool_mulib can
 create the same source again. Plugins never add their own endpoints.
 
-```php
-namespace tool_muprog\muform\autocompletemany;
+- `search($query, $maxitems, $exclude)` finds options. `$exclude` holds the values already selected
+  in an `autocompletemany` element. Excluding them in SQL keeps `$maxitems` accurate, but sources may
+  ignore it: the endpoint never offers selected values again.
+- Labels of stored values come from `labels(array)`, or from `label_value(string)` called for each
+  value by the default `labels()`.
+- Values may be refused with a reason by `validate(array)`, or by `validate_value(string)` called for
+  each value by the default `validate()`.
 
-final class program_allocation_userids extends \tool_mulib\muform\autocompletemany\base {
+Override whichever is simpler: per-value hooks for checks of one record, the array methods when one
+query handles all values, as the traits do.
+
+```php
+namespace tool_muprog\muform\autocomplete;
+
+final class program_allocation_userids extends \tool_mulib\muform\autocomplete\base {
     use \tool_mulib\muform\util\autocomplete\user_trait;
 
     public function __construct(private int $programid) {
@@ -376,12 +394,253 @@ final class program_allocation_userids extends \tool_mulib\muform\autocompletema
         return $this->validate_users($values);
     }
 }
+
+final class user_mapping_userid extends \tool_mulib\muform\autocomplete\base {
+    // ...
+    protected function validate_value(string $value): ?string {
+        return mapping::fetch_by_userid((int)$value) ? get_string('error_usermapped', 'auth_musaml') : null;
+    }
+}
 ```
 
 A value without a label is rejected on submit, which is how permissions are enforced. When more than
 `get_maxitems()` options match, `search()` returns `null` and the user is asked to type more. The
-traits in `classes/muform/util/autocomplete/` cover users, cohorts and category contexts, and
-`tool_mulib\local\search_util` has the search SQL.
+traits in `classes/muform/util/autocomplete/` cover users, courses and category contexts, and
+`tool_mulib\local\search_util` has the search SQL. Cohorts are selected with the [cohort picker](#cohort-picker),
+not with autocompletes. `site_users` offers all users of a context to users
+with `moodle/user:viewalldetails`.
+
+### Picker
+
+`picker` picks one value, `pickermany` a list. Use them when typing part of a name is not enough to
+find the right item: users need columns, filters or a tree to see what they pick. For Moodle users use
+[User picker](#user-picker) elements, `picker` and `pickermany` are for picker families of plugins. Selected values
+are pills with a remove button. The button after them opens a panel over the right half of the
+screen, and the form stays visible on the left. The panel is a native modal `<dialog>` of its own, not
+a muform dialog, so it also works over forms in muform dialogs and wizards.
+
+Pickers come in families. A family is three things:
+
+- an abstract source base extending `tool_mulib\muform\picker\base`, with one subclass per usage;
+- a panel component (React), the default export of the module named by `get_panel()`;
+- the family's own endpoints that the panel talks to. Panels differ a lot (a paged search with filters,
+  a whole tree loaded at once), so tool_mulib has no generic picker endpoint.
+
+The source works like an autocomplete source. Its constructor takes plain ids and does the access
+control, and `get_args()` returns them. `labels()` returns label HTML for values that may be
+selected, and `validate()` can refuse a value with a reason - or `validate_value()` one value at a
+time, the same as in autocomplete sources. `get_panel_strings()` gives the panel
+its strings and must include `title`. One source serves both elements; the panel gets `multiple`
+as a prop.
+
+```php
+namespace tool_x\local\categorypicker;
+
+abstract class base extends \tool_mulib\muform\picker\base {
+    final public function get_panel(): string {
+        return 'tool_x/categorypicker/panel';
+    }
+
+    final public function get_panel_strings(bool $multiple): array {
+        return ['title' => get_string($multiple ? 'categories' : 'category'), 'search' => get_string('search')];
+    }
+
+    // Shared labels(), the tree for the panel, ...
+}
+
+final class program_category extends base {
+    public function __construct(private int $programid) {
+        require_capability('tool/x:edit', program::get_context($programid));
+    }
+
+    public function get_args(): array {
+        return [$this->programid];
+    }
+}
+
+$form->add(new pickermany('categoryids', get_string('categories'), new program_category($programid)));
+```
+
+Values are opaque strings of letters, digits and `_-.:@`, the same as autocomplete values, so ids
+and tokens such as `category:5` both work. Commas separate values in the browser. A value without a
+label is rejected on submit, which is how permissions are enforced. `are_allowed($values)` of a source
+tells if all the values may be selected; forms use it in `validation()` to check values again with a source
+created from submitted data, for example for a newly selected category.
+
+Family endpoints recreate the source from the class name and arguments sent by the browser. Call
+`base::require_browser_session()` first, then `instantiate()` on the family base: it accepts only
+instantiable subclasses of that base with scalar arguments, living in the namespace of the family base
+below any installed component (`tool_x\muform\somepicker\base` accepts `tool_y\muform\somepicker\abc`).
+
+```php
+$source = \tool_x\local\categorypicker\base::instantiate($body['source'], $body['args']);
+```
+
+The panel component gets `PickerPanelProps` from `tool_mulib/muform/pickerpanel`: `source`
+(`class` and `args`), `multiple`, `selected` (values already in the field, never offered again),
+`strings`, `onPick(items)` and `onClose()`. `onPick` returns the picked values with their label HTML,
+so the element never fetches labels itself. `openPanel()` from the same module opens a panel
+outside forms, for example in an editor that adds several items at once.
+
+### User picker
+
+`userpicker` picks one user, `userpickermany` a list. They are pickers with a panel for Moodle users:
+one page of users at a time with full names and the identity fields visible in the source context
+(`showuseridentity` and `moodle/site:viewuseridentity`), searching names and those fields. Use them
+instead of a user autocomplete when users need to see who they pick, for example when allocating users.
+
+The source says where the users are picked from, the same way as autocomplete sources. It extends
+`tool_mulib\muform\userpicker\base`, lives in `<component>\muform\userpicker\` and serves both elements.
+Deleted, unconfirmed and guest users are never offered and tenant rules apply, the same as in the user
+autocomplete. Values are user ids.
+
+```php
+namespace tool_muprog\muform\userpicker;
+
+final class source_manual_allocate_users extends \tool_mulib\muform\userpicker\base {
+    private context $context;
+
+    public function __construct(private readonly int $programid) {
+        $this->context = program::get_context($programid);
+        require_capability('tool/muprog:allocate', $this->context);
+    }
+
+    public function get_args(): array {
+        return [$this->programid];
+    }
+
+    protected function get_context(): context {
+        return $this->context;
+    }
+
+    protected function get_candidates_sql(): ?sql {
+        return new sql("NOT EXISTS (SELECT 'x' FROM {tool_muprog_allocation} pa
+                                     WHERE pa.userid = u.id AND pa.programid = :aprogid)", ['aprogid' => $this->programid]);
+    }
+}
+
+$form->add(new userpickermany('users', get_string('users'), new source_manual_allocate_users($programid)));
+```
+
+`get_candidates_sql()` limits who may be picked (all users by default), `get_selected_sql()` decides
+which stored values stay valid (the candidates by default), and `allow_suspended_users()` refuses
+suspended users when it returns false. `get_current_userids()` lists users of the edited item that
+stay valid as the current value whatever the candidates, selected and tenant rules say, for example
+the current supervisor of an edited relation; the search does not offer them. `site_users` offers all users of a context to users with
+`moodle/user:viewalldetails`. The search endpoint is `tool_mulib\route\api\muform\userpicker`.
+In Behat, table values are user ids, full names or identity field values such as emails; the filters are
+removed before a user is looked up, so suspended users are found too.
+
+Filters are pills below the search field that look and work like the report filter bar: a pill opens
+the editor of its value, the cross removes it, filters without a value are in "Add filter" and
+"Reset filters" returns to the default values. Every source that allows suspended users has the
+pinned "Active" filter, set to "Yes" when the panel opens, so suspended users are hidden until the
+filter is removed ("Active: Any") or changed to "No". The "Cohort" filter in "Add filter" lists members
+of one cohort: only cohorts whose members the current user may list are found, see
+`cohort_util::get_view_members_sql()`. Sources add their own filters in `get_filters()`:
+
+```php
+protected function get_filters(): array {
+    $filters = parent::get_filters();
+    $filters[] = filter::boolean(
+        'completed',
+        get_string('completed', 'tool_muprog'),
+        new sql("EXISTS (SELECT 'x' FROM {tool_muprog_allocation} ca WHERE ca.userid = u.id AND ca.timecompleted IS NOT NULL)"),
+        new sql("NOT EXISTS (SELECT 'x' FROM {tool_muprog_allocation} ca WHERE ca.userid = u.id AND ca.timecompleted IS NOT NULL)"),
+    );
+    $filters[] = filter::select(
+        'auth',
+        get_string('authentication'),
+        ['manual' => 'Manual accounts', 'oauth2' => 'OAuth 2'],
+        fn(string $value): sql => new sql('u.auth = :auth', ['auth' => $value]),
+    )->set_pinned();
+    return $filters;
+}
+```
+
+`tool_mulib\muform\picker\filter::boolean()` has Yes and No values, `filter::select()` a list of options
+with plain text labels (a search box is added for more than 10); conditions use table alias `u`. The
+last argument is the default value, without it the filter starts in "Add filter".
+`filter::autocomplete($key, $label, $source, $where)` is for values that cannot be listed: the editor searches
+an [autocomplete](#autocomplete) source through the autocomplete endpoint and only values known to `labels()`
+of the source are accepted, so the source is the access control of the filter values - the "Cohort" filter
+uses `tool_mulib\muform\autocomplete\member_cohorts`. `set_pinned()` keeps
+the pill in the bar when it has no value, as "Authentication: Any" (the second argument replaces "Any").
+Keys are unique in the source: lowercase letters, digits and underscores. Filters only narrow down the
+list of candidates, `validate()` and `get_selected_sql()` decide what may be stored.
+
+The filters are not specific to users, any picker family can have them:
+
+- the family base lets sources define `tool_mulib\muform\picker\filter` objects with conditions on its own table aliases;
+- the family endpoint creates `new filter_set($filters, filter_set::clean_values($body['filters'] ?? null))`,
+  adds `get_sqls()` to its query (or reads `get_value($key)`) and returns `export()` in the answer;
+- `get_panel_strings()` of the family adds `filter_set::get_panel_strings()`;
+- the panel renders `<Filters filters strings onChange onCancel />` from `tool_mulib/muform/pickerfilters` and
+  sends `filters` as an object of values by keys once the user changed one; until then the endpoint
+  applies the default values.
+
+### Cohort picker
+
+`cohortpicker` picks one cohort, `cohortpickermany` a list. The panel shows cohorts inside the tree of
+course categories they belong to: "System" and each category are headings, the cohorts are listed below
+their category. Only branches with cohorts are shown, and a search in names, ID numbers and descriptions
+keeps the found cohorts in their place of the tree, so cohorts with the same name can be told apart.
+At most 200 cohorts are listed, with more the panel asks to refine the search.
+
+The source extends `tool_mulib\muform\cohortpicker\base`, lives in `<component>\muform\cohortpicker\`
+and serves both elements. Values are cohort ids.
+
+The source does the access control of the edited item in its constructor, the base decides which cohorts
+are offered - the cohorts the current user may **use**, see `cohort_util::get_use_sql()`:
+
+| Cohort | May be picked |
+|---|---|
+| standard cohorts and cohorts of other plugins | visible cohorts, or `moodle/cohort:view` in the cohort context |
+| advanced cohorts of tool_mucohort (curated, rule-based) | the same, or an access record with "Use cohort" |
+
+With multi-tenancy cohorts of other tenants are not offered. Using a cohort does not include seeing its
+members, that is a separate and stricter permission, see `cohort_util::get_view_members_sql()`. A form that
+reveals members of the picked cohorts must require it too, the compare tool of tool_mucohort does it with
+`get_restriction_sql()` returning `cohort_util::get_view_members_sql('ch', (int)$USER->id)`. Both rules are
+described in the README of tool_mucohort.
+
+```php
+namespace tool_muprog\muform\cohortpicker;
+
+final class source_cohort_edit_cohortids extends \tool_mulib\muform\cohortpicker\base {
+    private context $context;
+
+    public function __construct(private readonly int $programid) {
+        $this->context = program::get_context($programid);
+        require_capability('tool/muprog:edit', $this->context);
+    }
+
+    public function get_args(): array {
+        return [$this->programid];
+    }
+
+    protected function get_context(): context {
+        return $this->context;
+    }
+
+    protected function get_current_cohortids(): array {
+        global $DB;
+        // Cohorts already allocated stay valid whatever changed since.
+        $source = $DB->get_record('tool_muprog_source', ['programid' => $this->programid, 'type' => 'cohort']);
+        return $source ? $DB->get_fieldset('tool_muprog_src_cohort', 'cohortid', ['sourceid' => $source->id]) : [];
+    }
+}
+
+$form->add(new cohortpickermany('cohortids', get_string('cohorts', 'cohort'), new source_cohort_edit_cohortids($programid)));
+```
+
+`get_context()` is the context of the edited item, tenant rules use it. `get_current_cohortids()` lists cohorts
+already used by the edited item, they stay valid as the current value; `get_excluded_cohortids()` lists cohorts
+that must never be picked, for example the edited cohort itself; `get_restriction_sql()` adds a condition cohorts
+must match to be picked (aliases `ch` for the cohort and `ctx` for its context), current cohorts are not affected.
+`context_cohorts` offers all cohorts the user may use for an item in a context. The search endpoint is
+`tool_mulib\route\api\muform\cohortpicker`.
+In Behat, table values are cohort names, ID numbers or ids.
 
 ### Tags
 
@@ -403,7 +662,12 @@ if cleaning would change it, that is an error.
 `radios`, `checkboxes`, `select` and `multiselect` take an array of labels indexed by keys, or a
 `tool_mulib\muform\util\options` object when you need groups. Labels must be strings, so convert
 `lang_string` values with `array_map('strval', ...)`. An empty key in `select` is the "Choose..."
-option and returns `null`. For short lists like roles, `checkboxes` is nicer than `multiselect`.
+option and returns `null`. A `select` without it never returns `null`: the first option is used when
+no value is given (browsers show it selected anyway) and the required marker is not shown, because
+the user cannot leave it empty. A submitted value outside the options is a validation error, such a
+value in current data or default triggers developer debugging and the first option is used. A frozen
+`select` returns the given value unchanged, even when it is not among the options. For short lists
+like roles, `checkboxes` is nicer than `multiselect`.
 
 ### Cards
 
@@ -413,6 +677,9 @@ the options. Descriptions are always visible and linked to the input with `aria-
 whole card is clickable. Use them instead of help buttons when users must understand what the
 options mean before choosing, for example cohort types or consequences of a conversion. There is
 no inline variant. The look is inspired by Bootstrap 6 field group cards.
+
+Unlike `radios`, `radiocards` is required by default: submitting without a selection is a validation
+error, use `set_default()` to preselect an option or `set_required(false)` to allow no selection.
 Descriptions are plain text on purpose: the clickable card cannot contain links or other interactive
 content, and screen readers read the description as text.
 
@@ -432,6 +699,8 @@ takes `1`, `yes` or `Yes` and `0`, `no` or `No`, and an empty cell leaves the an
 Attributes are the usual HTML attributes of each element, like `maxlength`, `min`, `rows` or
 `placeholder`. Unknown ones are ignored with a debugging message. Text-like inputs also accept
 `width` with `small`, `medium` or `full`.
+Buttons accept `primary`, and `link` with `small` for minor actions inside the form such as adding or
+removing a row.
 
 `set_required(true)` makes a value required. `set_required_marker(true)` only shows the marker and
 is meant for your own validator, usually `required_if_visible` for fields that appear through display
@@ -488,10 +757,26 @@ template can be replaced with `set_template()`, also from the hook, and
 
 ## Layout elements
 
-`section` and `buttons` hold other elements, added with `$this->add($element, 'parentname')`. They
+`section`, `collapsible` and `buttons` hold other elements, added with `$this->add($element, 'parentname')`. They
 return no data. Their templates get the children in order as `elements` and by name as
 `elements_byname`, so a custom template can place each child where it wants. It must render every
 child though, otherwise that child is not submitted.
+
+`collapsible` is a section that the user can collapse, a Bootstrap accordion item made of a native
+`details` element with the label in its header and an optional `set_summary()` text next to it. Collapsing is not
+hiding: collapsed elements are submitted and validated, display rules are still the only way to hide
+something.
+- It is always expanded by default. A section the user collapses stays collapsed while the page passes
+  the same state key (third constructor argument), kept in the browser session storage. Use a key that
+  ends with the work, such as the wizard instance id plus the record, so the state never leaks into the
+  next run. Without a key the state is not remembered.
+- A section with an error inside is expanded and its header shows an error icon, both when the server
+  renders errors and after a failed submission in the browser.
+- With two or more collapsible sections the form adds "Expand all" and "Collapse all" above the first one.
+- Behat: the label is the text of the `summary`, click it to toggle the section.
+
+Buttons have `set_confirm($question)`: the browser asks before the button submits, typically a reload
+button that throws away entered data such as "Remove row". There is no confirmation without JavaScript.
 
 For a really custom part of a page, such as an editor with a preview pane, write your own layout
 element in your plugin with its own template and ES module. The module should find its children by
@@ -538,6 +823,13 @@ secret. Checkboxes are checked by anything except empty or `0`. Files are upload
 `I type "Faculty" into the "tenantid" muform search field` types into an autocomplete without picking
 anything, and `the open muform list should be fully visible` checks the result list is not cut off.
 
+Values of `picker` and `pickermany` depend on the panel family. The element helper removes the
+pills, opens the panel and leaves each comma separated item to the family's panel helper:
+module `<component>/<path>` is served by class `<component>\tests\muform\picker\<path with _>`
+in `<component>/tests/classes/muform/picker/`, extending `tool_mulib\tests\muform\picker\panel_base`
+(`is_ready()`, `search()`, `pick()`, `confirm()` and `label_matches()`). Steps working with a panel
+opened outside a form use `panel_base::wait_for_panel()`.
+
 Every element type has a Behat helper in `tests/classes/muform/element/<type>.php`, a fixture page in
 `tests/behat/fixtures/` and its own feature file. When you write a new element, copy the `text`
 fixture and feature, they show the usual set of scenarios. Fixture pages must check
@@ -554,8 +846,10 @@ never touches the markup inside an element; it reads `getValue()`, updates `stat
 Elements report changes with a `muform:change` event and can call `form.submit()`, `form.reload()`
 or `form.cancel()`.
 
-The browser validates on submit and when the user leaves a changed field, but the server always has
-the final word. A form is only submitted once, the buttons are disabled until a new form arrives.
+The browser validates on submit and when the user leaves a field, but the server always has the
+final word. Errors must never move what the user is clicking: a field left with a mouse or finger is
+validated only after the press ended and the click landed; leaving with the keyboard validates at once. Pressing a button of the form never validates the field
+left, the submit does. A form is only submitted once, the buttons are disabled until a new form arrives.
 
 Forms are watched by the core change checker, so leaving a page with changed values asks for
 confirmation. `$form->set_dirty(true)` in the handler, or `form.markDirty()` in JavaScript, marks a form
@@ -595,6 +889,9 @@ Stages that do not apply now are passed to `resolve_stages()` as skipped, the st
 greyed out. Stage names are lowercase letters, `?stage=` requests a completed stage.
 `set_data()` stores defaults without completing anything.
 
+Write wizards as a `wizard_page` class (below). The `wizard` class used directly looks like this,
+it is what `wizard_page` does for you:
+
 ```php
 $name = 'auth_musaml_user_upload:' . $idp->id;
 $stages = ['source' => 'Source', 'columns' => 'Columns', 'options' => 'Options'];
@@ -615,12 +912,13 @@ $stage = $wizard->resolve_stages($isvalid);
 if ($wizard->is_finished()) {
     // All stages completed, do the job, delete the wizard and redirect.
 }
-$form = new user_upload_source($wizard->get_url($pageurl, $stage), $data, ['idp' => $idp]);
+$form = new source($wizard->get_url($pageurl, $stage), $data, ['idp' => $idp]);
 if ($form->is_cancelled()) {
     $wizard->delete();
     redirect($returnurl);
 }
 if ($form->is_reloaded() && $wizard->get_previous_stage() !== null && $form->get_element('back')->get_value()) {
+    // Back without changes, wizard_page also handles Back with changes.
     redirect($wizard->get_url($pageurl, $wizard->get_previous_stage()));
 }
 if ($submitted = $form->get_data()) {
@@ -631,7 +929,127 @@ echo $OUTPUT->header();
 echo $wizard->render($OUTPUT, $pageurl, $form);
 ```
 
-The Back button is a `reload` element. Cancel and the final submit delete the row. The stepper is
+### Wizard page class
+
+The script above is the same in every wizard, so write a class extending `wizard_page` instead and
+keep the entry script thin: page parameters, `require_login()`, then
+`(new \myplugin\local\wizard\user_upload\wizard($id))->execute();`. Keep everything of one wizard
+together: `<component>\local\wizard\<name>\wizard` with one form class per stage next to it, named
+after the stage (`source`, `columns`, `options`). Code shared by several wizards goes to
+`<component>\local\wizard\shared`.
+
+```php
+final class wizard extends \tool_mulib\muform\wizard_page {
+    public function __construct(private stdClass $idp) {
+        require_capability('auth/musaml:managemappings', \core\context\system::instance());
+    }
+    protected function get_name(): string {
+        return 'auth_musaml_user_upload:' . $this->idp->id;
+    }
+    protected function get_stages(): array {
+        return ['source' => 'Source', 'columns' => 'Columns', 'options' => 'Options'];
+    }
+    protected function is_stage_valid(string $stage): bool { ... }      // from $this->state
+    protected function create_form(string $stage, url $formurl): form { ... }
+    protected function submit_stage(string $stage, stdClass $data, form $form): ?url {
+        $this->state = ...;     // store the stage, it is completed after returning null
+        return null;
+    }
+    protected function finish(): ?url { ... }   // all stages completed: do the job, delete, return where to go
+    // Also get_page_url(), get_return_url() and setup_page().
+}
+```
+
+`execute()` does the rest: loads or starts the state, resolves the stage, handles Cancel and Back,
+completes the stage and prints the page. Hooks work with these properties:
+
+- `$this->state` - the stored data, loaded before `check_state()`; `submit_stage()` and
+  `reload_stage()` change it and the page stores it;
+- `$this->wizard` - the `wizard` object, for `set_data()` in `start_state()` and `delete()` when
+  finishing;
+- `$this->stage` and `$this->formurl` - the current stage and its URL, set before `create_form()`.
+
+`setup_page()` sets `$PAGE` (context, URL, layout, title, heading, navigation). `submit_stage()`
+returns null to complete the stage and continue, or a URL to go elsewhere without completing it:
+after finishing (delete the wizard first), or `$this->formurl` to show the stage again. Values
+computed in `create_form()`, such as problems shown on a summary stage, may be kept in properties
+for `submit_stage()` of the same request. Optional hooks:
+
+- `start_state()` stores defaults of a new wizard or completes stages that need no input, and may
+  return the stage to open;
+- `get_unavailable_reason()` returns why the wizard cannot be used now (for example the program was
+  archived); the stored wizard is deleted, the reason is shown as a notification on the return page;
+- `check_state()` stops a wizard whose stored state cannot be used any more;
+- `get_skipped_stages()` lists stages that do not apply now;
+- `finish()` is for wizards finished when all stages are completed; wizards with a last summary
+  stage finish in `submit_stage()` of that stage instead, by returning the URL to go to;
+- `reload_stage()` handles reload buttons other than Back, such as adding a row, see below;
+- `get_locked_stages()` lists stages that cannot be changed once completed, together with all stages
+  before them; `create_form()` renders them read-only when `is_stage_locked()`, Continue and Back
+  there only move to the next or previous stage and nothing is submitted;
+- `keeps_later_stages()` is for wizards editing existing data: all stages are completed from the
+  start, submitting one goes to the following stage and the later ones stay completed;
+- `get_heading()` is printed above the stepper, when the page heading is not the wizard title;
+- `render_page()` prints the page.
+
+### Wizard access control
+
+`wizard_page` does no access control of its own. Every request goes through the same steps, so
+follow these rules in every wizard:
+
+1. The entry script reads the page parameters, calls `require_login()` and then
+   `(new wizard(...))->execute()`, nothing else.
+2. The constructor loads the records named by the parameters with `MUST_EXIST`, finds their
+   context and checks the capability there with `require_capability()`, or throws
+   `required_capability_exception` for rules that are not a single capability. It runs on every
+   request, so a revoked permission stops the wizard at the next step.
+3. The stored state is input from earlier requests. Anything chosen in an earlier stage that
+   depends on permissions or on the current data, such as an action, a type or a target record,
+   is checked again before it is used, in `check_state()`, `is_stage_valid()` or `finish()`.
+4. `get_unavailable_reason()` covers changes of the target that make the wizard pointless, such
+   as an archived program, it is evaluated on every request too.
+5. Rows of uploaded data pass the same checks as the single item pages, the user pickers and the
+   web services of the same feature: tenant restrictions, protection of site administrators,
+   deleted and suspended users. Keep each rule in one function and call it from all of them, an
+   upload must never accept a user that the user picker would not offer.
+6. Changes are written only in `submit_stage()` or `finish()`, which run after a muform submission
+   with a valid sesskey. Never change data in `create_form()`, `start_state()` or
+   `get_unavailable_reason()`, they also run on plain page loads.
+
+Uploads: questions that affect the whole wizard (what to do with the uploaded rows, for example)
+are asked before it, usually in a dialog form whose answers become page parameters and part of the
+wizard name. The upload or pasted data is the first stage, stored parsed (never the draft item id of
+the file), and locked: later stages depend on it, different data means starting again.
+
+### Wizard buttons
+
+Stage forms use `wizardcontinue` (submit named `submit`, "Continue") and `wizardback` (named `back`),
+the first stage has no Back:
+
+```php
+$this->add(new buttons('buttons'));
+$this->add(new wizardcontinue(), 'buttons');
+$this->add(new wizardback(), 'buttons');
+$this->add(new cancel(), 'buttons');
+```
+
+Back must not lose what the user entered, and the wizard never stores data that were not validated.
+So when nothing was changed in the browser Back reloads the form and the wizard goes to the
+previous stage; when something was changed Back submits the form for validation like Continue, the
+stage is stored and completed, then the wizard goes back. Invalid values keep the user on the stage.
+The browser picks the way, the server only sees a reload or a submission, so it cannot be made to
+store unvalidated data. Without JavaScript Back always reloads.
+
+Use `new wizardback(validate: false)` on a last stage whose submission finishes the wizard, there
+Back never stores anything. A form counts as changed also when it was rendered from submitted data,
+for example after a failed validation, or after `$form->set_changed(true)`.
+
+`reload_stage()` of `wizard_page` only changes `$this->state`, for example adds a row with the typed
+values. The page stores the changed state and marks the stage as changed (`wizard::mark_changed()`),
+so Back validates it and leaving the stage asks for confirmation; the mark is forgotten when the
+stage is completed.
+
+Cancel and the final submit delete the row. The stepper is
 horizontal for up to 6 steps when there is room, and a sticky column left of the form in wide pages.
 With completed stages the form is marked dirty, so leaving the page asks for confirmation; stepper
 links do not ask unless the current stage was changed.
